@@ -6,15 +6,18 @@ import re
 import secrets
 import smtplib
 import ssl
+from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
+from time import monotonic
 from typing import Literal
 
 import jwt
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     Boolean,
@@ -45,6 +48,8 @@ STUDENT_EMAIL_PATTERN = os.getenv(
 )
 STAFF_EMAIL_DOMAIN = os.getenv("STAFF_EMAIL_DOMAIN", "iit.du.ac.bd")
 SUPER_ADMIN_EMAIL = os.getenv("SUPER_ADMIN_EMAIL", "").strip().lower()
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 
 
 class Base(DeclarativeBase):
@@ -81,6 +86,8 @@ class StudentProfile(Base):
     current_address: Mapped[str | None] = mapped_column(Text)
     blood_group: Mapped[str | None] = mapped_column(String(3))
     last_blood_donation: Mapped[date | None] = mapped_column(Date)
+    donor_available: Mapped[bool] = mapped_column(Boolean, default=False)
+    donor_contact_visible: Mapped[bool] = mapped_column(Boolean, default=False)
     profile_completed: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
@@ -286,6 +293,29 @@ class Feedback(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    message: Mapped[str] = mapped_column(Text)
+    read: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    action: Mapped[str] = mapped_column(String(100))
+    entity_type: Mapped[str] = mapped_column(String(50))
+    entity_id: Mapped[int]
+    details: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 Base.metadata.create_all(engine)
 if engine.dialect.name == "postgresql":
@@ -307,6 +337,8 @@ if engine.dialect.name == "postgresql":
             "current_address TEXT",
             "blood_group VARCHAR(3)",
             "last_blood_donation DATE",
+            "donor_available BOOLEAN DEFAULT FALSE",
+            "donor_contact_visible BOOLEAN DEFAULT FALSE",
             "profile_completed BOOLEAN DEFAULT FALSE",
         ):
             connection.execute(text(f"ALTER TABLE student_profiles ADD COLUMN IF NOT EXISTS {column}"))
@@ -314,11 +346,34 @@ if engine.dialect.name == "postgresql":
 app = FastAPI(title="IIT Management API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.getenv("FRONTEND_URL", "http://localhost:5173")],
+    allow_origins=[FRONTEND_URL],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+auth_attempts: dict[tuple[str, str], list[float]] = defaultdict(list)
+
+
+@app.middleware("http")
+async def security(request: Request, call_next):
+    origin = request.headers.get("origin")
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and origin and origin != FRONTEND_URL:
+        return JSONResponse({"detail": "Origin not allowed"}, status_code=403)
+    if request.url.path.startswith("/api/auth/") and request.method == "POST":
+        # ponytail: per-instance limiter; replace with shared Redis limits at multi-instance scale.
+        key = (request.client.host if request.client else "unknown", request.url.path)
+        now = monotonic()
+        auth_attempts[key] = [seen for seen in auth_attempts[key] if now - seen < 60]
+        if len(auth_attempts[key]) >= 20:
+            return JSONResponse({"detail": "Too many attempts. Try again later."}, status_code=429)
+        auth_attempts[key].append(now)
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response
 
 
 class Signup(BaseModel):
@@ -370,6 +425,8 @@ class StudentProfileUpdate(BaseModel):
     current_address: str = Field(min_length=3, max_length=1000)
     blood_group: Literal["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"] | None = None
     last_blood_donation: date | None = None
+    donor_available: bool = False
+    donor_contact_visible: bool = False
 
 
 class CRPositionCreate(BaseModel):
@@ -523,10 +580,27 @@ def make_token(user: User) -> str:
     )
 
 
-def current_user(authorization: str = Header()) -> User:
+def set_session(response: Response, user: User) -> None:
+    response.set_cookie(
+        "session",
+        make_token(user),
+        max_age=7 * 24 * 60 * 60,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="none" if COOKIE_SECURE else "lax",
+    )
+
+
+def current_user(
+    authorization: str | None = Header(default=None), session: str | None = Cookie(default=None)
+) -> User:
     try:
-        scheme, token = authorization.split(" ", 1)
-        if scheme.lower() != "bearer":
+        token = session
+        if not token and authorization:
+            scheme, token = authorization.split(" ", 1)
+            if scheme.lower() != "bearer":
+                raise ValueError
+        if not token:
             raise ValueError
         user_id = int(jwt.decode(token, JWT_SECRET, algorithms=["HS256"])["sub"])
     except (ValueError, KeyError, jwt.PyJWTError):
@@ -564,6 +638,24 @@ def get_student(db: Session, user_id: int) -> StudentProfile:
     if not profile:
         raise HTTPException(404, "Student profile not found")
     return profile
+
+
+def notify(db: Session, user_id: int, title: str, message: str) -> None:
+    db.add(Notification(user_id=user_id, title=title, message=message))
+
+
+def audit(
+    db: Session, actor_id: int, action: str, entity_type: str, entity_id: int, details: str = ""
+) -> None:
+    db.add(
+        AuditLog(
+            actor_id=actor_id,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            details=details,
+        )
+    )
 
 
 @app.get("/api/health")
@@ -645,7 +737,7 @@ def resend_verification(body: EmailRequest):
 
 
 @app.post("/api/auth/verify-email")
-def verify_email(body: OtpRequest):
+def verify_email(body: OtpRequest, response: Response):
     email = body.email.strip().lower()
     with Session(engine) as db:
         user = db.scalar(select(User).where(User.email == email))
@@ -672,15 +764,16 @@ def verify_email(body: OtpRequest):
         user.otp_attempts = 0
         db.commit()
         db.refresh(user)
+        if user.status == "ACTIVE":
+            set_session(response, user)
         return {
-            "token": make_token(user) if user.status == "ACTIVE" else None,
             "user": {"email": user.email, "name": user.name, "role": user.role},
             "status": user.status,
         }
 
 
 @app.post("/api/auth/signin")
-def signin(body: Signin):
+def signin(body: Signin, response: Response):
     email = body.email.strip().lower()
     with Session(engine) as db:
         user = db.scalar(select(User).where(User.email == email))
@@ -695,8 +788,8 @@ def signin(body: Signin):
             db.refresh(user)
         if user.status != "ACTIVE":
             raise HTTPException(403, "Account is awaiting admin approval")
+        set_session(response, user)
         return {
-            "token": make_token(user),
             "user": {"email": user.email, "name": user.name, "role": user.role},
             "status": user.status,
         }
@@ -755,6 +848,14 @@ def me(user: User = Depends(current_user)):
     return {"email": user.email, "name": user.name, "role": user.role}
 
 
+@app.post("/api/auth/logout")
+def logout(response: Response):
+    response.delete_cookie(
+        "session", secure=COOKIE_SECURE, samesite="none" if COOKIE_SECURE else "lax"
+    )
+    return {"message": "Signed out"}
+
+
 @app.get("/api/admin/teachers")
 def pending_teachers(_: User = Depends(admin_user)):
     with Session(engine) as db:
@@ -765,7 +866,7 @@ def pending_teachers(_: User = Depends(admin_user)):
 
 
 @app.patch("/api/admin/teachers/{teacher_id}")
-def decide_teacher(teacher_id: int, body: TeacherDecision, _: User = Depends(admin_user)):
+def decide_teacher(teacher_id: int, body: TeacherDecision, actor: User = Depends(admin_user)):
     with Session(engine) as db:
         teacher = db.get(User, teacher_id)
         if not teacher or teacher.role != "TEACHER" or teacher.status != "PENDING":
@@ -774,12 +875,14 @@ def decide_teacher(teacher_id: int, body: TeacherDecision, _: User = Depends(adm
         if body.action == "MAKE_ADMIN":
             teacher.role = "DEPARTMENT_ADMIN"
         teacher.status = status
+        notify(db, teacher.id, "Account reviewed", f"Your account is now {status.lower()}.")
+        audit(db, actor.id, body.action, "user", teacher.id, teacher.role)
         db.commit()
     return {"status": status}
 
 
 @app.post("/api/admin/academic-setup", status_code=201)
-def create_academic_setup(body: AcademicSetup, _: User = Depends(admin_user)):
+def create_academic_setup(body: AcademicSetup, actor: User = Depends(admin_user)):
     with Session(engine) as db:
         program = db.scalar(select(Program).where(Program.code == body.program_code.upper()))
         if not program:
@@ -819,6 +922,7 @@ def create_academic_setup(body: AcademicSetup, _: User = Depends(admin_user)):
             db.add(course)
         if body.hall_name and not db.scalar(select(Hall).where(Hall.name == body.hall_name.strip())):
             db.add(Hall(name=body.hall_name.strip()))
+        db.flush()
         students = db.scalars(
             select(StudentProfile).where(
                 StudentProfile.program == program.code, StudentProfile.batch == batch.code
@@ -843,6 +947,7 @@ def create_academic_setup(body: AcademicSetup, _: User = Depends(admin_user)):
                             classroom_id=classroom_id, student_id=student.user_id
                         )
                     )
+        audit(db, actor.id, "UPSERT", "course", course.id, course.code)
         try:
             db.commit()
         except IntegrityError:
@@ -881,6 +986,8 @@ def profile_data(profile: StudentProfile) -> dict:
         "current_address": profile.current_address or "",
         "blood_group": profile.blood_group,
         "last_blood_donation": profile.last_blood_donation,
+        "donor_available": profile.donor_available,
+        "donor_contact_visible": profile.donor_contact_visible,
         "profile_completed": profile.profile_completed,
     }
 
@@ -940,6 +1047,14 @@ def create_election(body: ElectionCreate, user: User = Depends(admin_user)):
             raise HTTPException(400, "CR position not found")
         election = CRElection(**body.model_dump(), created_by=user.id)
         db.add(election)
+        db.flush()
+        position = db.get(CRPosition, body.position_id)
+        student_ids = db.scalars(
+            select(StudentProfile.user_id).where(StudentProfile.batch_id == position.batch_id)
+        )
+        for student_id in student_ids:
+            notify(db, student_id, "CR election scheduled", body.title)
+        audit(db, user.id, "CREATE", "election", election.id, election.title)
         db.commit()
         db.refresh(election)
         return {"id": election.id, "status": election.status}
@@ -1031,13 +1146,15 @@ def nominate(election_id: int, body: NominationCreate, user: User = Depends(stud
 
 
 @app.patch("/api/admin/candidates/{candidate_id}")
-def decide_candidate(candidate_id: int, body: CandidateDecision, _: User = Depends(admin_user)):
+def decide_candidate(candidate_id: int, body: CandidateDecision, actor: User = Depends(admin_user)):
     with Session(engine) as db:
         candidate = db.get(CRCandidate, candidate_id)
         if not candidate or candidate.status != "PENDING":
             raise HTTPException(404, "Pending candidate not found")
         status = "APPROVED" if body.action == "APPROVE" else "REJECTED"
         candidate.status = status
+        notify(db, candidate.student_id, "CR nomination reviewed", f"Your nomination is {status.lower()}.")
+        audit(db, actor.id, body.action, "candidate", candidate.id)
         db.commit()
     return {"status": status}
 
@@ -1066,7 +1183,7 @@ def vote(election_id: int, body: VoteCreate, user: User = Depends(student_user))
 
 
 @app.post("/api/admin/elections/{election_id}/close")
-def close_election(election_id: int, _: User = Depends(admin_user)):
+def close_election(election_id: int, actor: User = Depends(admin_user)):
     with Session(engine) as db:
         election = db.get(CRElection, election_id)
         if not election or election.status == "CLOSED":
@@ -1090,7 +1207,13 @@ def close_election(election_id: int, _: User = Depends(admin_user)):
                     student_id=student_id,
                 )
             )
+            notify(db, student_id, "CR election result", "You were elected as class representative.")
+        for student_id in db.scalars(
+            select(StudentProfile.user_id).where(StudentProfile.batch_id == position.batch_id)
+        ):
+            notify(db, student_id, "CR election closed", f"Results for {election.title} are published.")
         election.status = "CLOSED"
+        audit(db, actor.id, "CLOSE", "election", election.id)
         db.commit()
     return {"winners": [student_id for student_id, _ in winners]}
 
@@ -1119,6 +1242,8 @@ def create_classroom(body: ClassroomCreate, user: User = Depends(teacher_or_admi
                 select(StudentProfile.user_id).where(StudentProfile.batch_id == body.batch_id)
             ):
                 db.add(ClassroomEnrollment(classroom_id=classroom.id, student_id=student_id))
+                notify(db, student_id, "New classroom", f"You were enrolled in {course.code}.")
+            audit(db, user.id, "CREATE", "classroom", classroom.id, course.code)
             db.commit()
         except IntegrityError:
             raise HTTPException(409, "Classroom already exists")
@@ -1256,6 +1381,8 @@ def save_attendance(
                         status=item.status,
                     )
                 )
+                if item.status == "ABSENT":
+                    notify(db, item.student_id, "Attendance marked absent", str(class_session.session_date))
             elif record.status != item.status:
                 old_status = record.status
                 record.status = item.status
@@ -1267,6 +1394,9 @@ def save_attendance(
                         changed_by=user.id,
                     )
                 )
+                if item.status == "ABSENT":
+                    notify(db, item.student_id, "Attendance changed to absent", str(class_session.session_date))
+        audit(db, user.id, "SAVE", "attendance", class_session_id)
         db.commit()
     return {"message": "Attendance saved"}
 
@@ -1350,7 +1480,7 @@ def complaints(user: User = Depends(current_user)):
 
 @app.patch("/api/admin/complaints/{complaint_id}")
 def update_complaint(
-    complaint_id: int, body: ComplaintDecision, _: User = Depends(admin_user)
+    complaint_id: int, body: ComplaintDecision, actor: User = Depends(admin_user)
 ):
     with Session(engine) as db:
         complaint = db.get(Complaint, complaint_id)
@@ -1366,6 +1496,8 @@ def update_complaint(
         if transitions.get(complaint.status) != body.status:
             raise HTTPException(400, "Complaint status must follow the workflow")
         complaint.status = body.status
+        notify(db, complaint.submitter_id, "Complaint updated", f"{complaint.subject}: {body.status.replace('_', ' ').title()}")
+        audit(db, actor.id, "STATUS", "complaint", complaint.id, body.status)
         db.commit()
     return {"status": body.status}
 
@@ -1424,3 +1556,189 @@ def feedback_summary(classroom_id: int, user: User = Depends(teacher_or_admin)):
             },
             "comments": comments,
         }
+
+
+@app.get("/api/donors")
+def donors(
+    blood_group: Literal["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"] | None = None,
+    batch_id: int | None = None,
+    _: User = Depends(current_user),
+):
+    with Session(engine) as db:
+        statement = (
+            select(StudentProfile, User)
+            .join(User, User.id == StudentProfile.user_id)
+            .where(StudentProfile.donor_available.is_(True), User.status == "ACTIVE")
+        )
+        if blood_group:
+            statement = statement.where(StudentProfile.blood_group == blood_group)
+        if batch_id:
+            statement = statement.where(StudentProfile.batch_id == batch_id)
+        return [
+            {
+                "name": user.name,
+                "blood_group": profile.blood_group,
+                "batch": profile.batch,
+                "last_donation": profile.last_blood_donation,
+                "phone": profile.phone if profile.donor_contact_visible else None,
+            }
+            for profile, user in db.execute(statement.order_by(User.name))
+        ]
+
+
+@app.get("/api/notifications")
+def notifications(user: User = Depends(current_user)):
+    with Session(engine) as db:
+        items = db.scalars(
+            select(Notification)
+            .where(Notification.user_id == user.id)
+            .order_by(Notification.created_at.desc())
+            .limit(50)
+        )
+        return [
+            {
+                "id": item.id,
+                "title": item.title,
+                "message": item.message,
+                "read": item.read,
+                "created_at": item.created_at,
+            }
+            for item in items
+        ]
+
+
+@app.patch("/api/notifications/{notification_id}/read")
+def read_notification(notification_id: int, user: User = Depends(current_user)):
+    with Session(engine) as db:
+        item = db.get(Notification, notification_id)
+        if not item or item.user_id != user.id:
+            raise HTTPException(404, "Notification not found")
+        item.read = True
+        db.commit()
+    return {"read": True}
+
+
+@app.get("/api/dashboard")
+def dashboard(user: User = Depends(current_user)):
+    with Session(engine) as db:
+        unread = db.scalar(
+            select(func.count(Notification.id)).where(
+                Notification.user_id == user.id, Notification.read.is_(False)
+            )
+        ) or 0
+        if user.role == "STUDENT":
+            courses = db.scalar(
+                select(func.count(ClassroomEnrollment.id)).where(
+                    ClassroomEnrollment.student_id == user.id,
+                    ClassroomEnrollment.status == "ACTIVE",
+                )
+            ) or 0
+            open_complaints = db.scalar(
+                select(func.count(Complaint.id)).where(
+                    Complaint.submitter_id == user.id, Complaint.status != "RESOLVED"
+                )
+            ) or 0
+            attendance_total = db.scalar(
+                select(func.count(AttendanceRecord.id)).where(AttendanceRecord.student_id == user.id)
+            ) or 0
+            attended = db.scalar(
+                select(func.count(AttendanceRecord.id)).where(
+                    AttendanceRecord.student_id == user.id,
+                    AttendanceRecord.status.in_(["PRESENT", "LATE", "EXCUSED"]),
+                )
+            ) or 0
+            profile = get_student(db, user.id)
+            open_elections = db.scalar(
+                select(func.count(CRElection.id))
+                .join(CRPosition)
+                .where(CRPosition.batch_id == profile.batch_id, CRElection.status != "CLOSED")
+            ) or 0
+            return {
+                "attendance": round(attended / attendance_total * 100, 1) if attendance_total else 0,
+                "courses": courses,
+                "open_complaints": open_complaints,
+                "elections": open_elections,
+                "unread": unread,
+            }
+        if user.role == "TEACHER":
+            classroom_ids = select(Classroom.id).where(
+                Classroom.teacher_id == user.id, Classroom.status == "ACTIVE"
+            )
+            attendance_total = db.scalar(
+                select(func.count(AttendanceRecord.id))
+                .join(ClassSession)
+                .where(ClassSession.classroom_id.in_(classroom_ids))
+            ) or 0
+            attended = db.scalar(
+                select(func.count(AttendanceRecord.id))
+                .join(ClassSession)
+                .where(
+                    ClassSession.classroom_id.in_(classroom_ids),
+                    AttendanceRecord.status.in_(["PRESENT", "LATE", "EXCUSED"]),
+                )
+            ) or 0
+            return {
+                "classrooms": db.scalar(select(func.count()).select_from(classroom_ids.subquery())) or 0,
+                "students": db.scalar(
+                    select(func.count(func.distinct(ClassroomEnrollment.student_id))).where(
+                        ClassroomEnrollment.classroom_id.in_(classroom_ids)
+                    )
+                ) or 0,
+                "classes_this_month": db.scalar(
+                    select(func.count(ClassSession.id)).where(
+                        ClassSession.classroom_id.in_(classroom_ids),
+                        ClassSession.session_date >= date.today().replace(day=1),
+                    )
+                ) or 0,
+                "average_attendance": round(attended / attendance_total * 100, 1) if attendance_total else 0,
+                "unread": unread,
+            }
+        students = db.scalar(select(func.count(User.id)).where(User.role == "STUDENT")) or 0
+        teachers = db.scalar(select(func.count(User.id)).where(User.role == "TEACHER")) or 0
+        complaints_total = db.scalar(select(func.count(Complaint.id))) or 0
+        complaints_resolved = db.scalar(
+            select(func.count(Complaint.id)).where(Complaint.status == "RESOLVED")
+        ) or 0
+        enrollments = db.scalar(select(func.count(ClassroomEnrollment.id))) or 0
+        feedback_count = db.scalar(select(func.count(Feedback.id))) or 0
+        attendance_total = db.scalar(select(func.count(AttendanceRecord.id))) or 0
+        attended = db.scalar(
+            select(func.count(AttendanceRecord.id)).where(
+                AttendanceRecord.status.in_(["PRESENT", "LATE", "EXCUSED"])
+            )
+        ) or 0
+        return {
+            "students": students,
+            "teachers": teachers,
+            "classrooms": db.scalar(
+                select(func.count(Classroom.id)).where(Classroom.status == "ACTIVE")
+            ) or 0,
+            "open_complaints": complaints_total - complaints_resolved,
+            "complaint_resolution": round(complaints_resolved / complaints_total * 100, 1) if complaints_total else 0,
+            "feedback_response": round(feedback_count / enrollments * 100, 1) if enrollments else 0,
+            "average_attendance": round(attended / attendance_total * 100, 1) if attendance_total else 0,
+            "unread": unread,
+        }
+
+
+@app.get("/api/admin/audit")
+def audit_log(_: User = Depends(admin_user)):
+    with Session(engine) as db:
+        rows = db.execute(
+            select(AuditLog, User)
+            .join(User, User.id == AuditLog.actor_id)
+            .order_by(AuditLog.created_at.desc())
+            .limit(100)
+        )
+        return [
+            {
+                "id": item.id,
+                "actor": actor.email,
+                "action": item.action,
+                "entity": item.entity_type,
+                "entity_id": item.entity_id,
+                "details": item.details,
+                "created_at": item.created_at,
+            }
+            for item, actor in rows
+        ]

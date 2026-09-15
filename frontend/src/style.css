@@ -37,4 +37,12 @@ article button { padding: 8px 10px; }
 .check { display: flex; align-items: center; }
 .check input { width: auto; }
 .election small { display: block; color: #607068; }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin: 28px 0 20px; }
+.metrics div { padding: 16px; border-radius: 10px; background: #eef6f1; }
+.metrics strong, .metrics small { display: block; }
+.metrics strong { font-size: 1.6rem; }
+.metrics small { margin-top: 4px; text-transform: capitalize; color: #607068; }
+.notices { display: grid; gap: 8px; }
+.notices button { text-align: left; }
+.notices .read { color: #53615a; background: #e8ece9; }
 @media (max-width: 600px) { section { padding: 28px 20px; } article { align-items: flex-start; flex-wrap: wrap; } }

@@ -13,11 +13,10 @@ function App() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    const token = localStorage.getItem("token");
-    if (token)
-      fetch(`${API}/api/me`, { headers: { Authorization: `Bearer ${token}` } })
-        .then((response) => response.ok && response.json())
-        .then((data) => data && setUser(data));
+    localStorage.removeItem("token");
+    fetch(`${API}/api/me`, { credentials: "include" })
+      .then((response) => response.ok && response.json())
+      .then((data) => data && setUser(data));
   }, []);
 
   function update(event) {
@@ -43,6 +42,7 @@ function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        credentials: "include",
       });
       const data = await response.json();
       if (!response.ok) {
@@ -62,8 +62,7 @@ function App() {
         setMode("verify");
         return setMessage("Enter the verification code sent to your email.");
       }
-      if (!data.token) return setMessage("Teacher account submitted for admin approval.");
-      localStorage.setItem("token", data.token);
+      if (data.status !== "ACTIVE") return setMessage("Teacher account submitted for admin approval.");
       setUser(data.user);
     } catch {
       setMessage("Cannot reach the server.");
@@ -95,8 +94,8 @@ function App() {
     }
   }
 
-  function logout() {
-    localStorage.removeItem("token");
+  async function logout() {
+    await fetch(`${API}/api/auth/logout`, { method: "POST", credentials: "include" });
     setUser(null);
   }
 

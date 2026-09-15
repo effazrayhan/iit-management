@@ -7,7 +7,7 @@ os.environ["DATABASE_URL"] = "sqlite://"
 os.environ["JWT_SECRET"] = "test"
 os.environ["SUPER_ADMIN_EMAIL"] = "admin@iit.du.ac.bd"
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -37,6 +37,7 @@ from api.index import (
     VoteCreate,
     admin_user,
     attendance_summary,
+    audit_log,
     close_election,
     create_academic_setup,
     create_class_session,
@@ -46,8 +47,11 @@ from api.index import (
     create_election,
     decide_candidate,
     decide_teacher,
+    dashboard,
+    donors,
     engine,
     nominate,
+    notifications,
     save_attendance,
     signup,
     submit_feedback,
@@ -63,7 +67,7 @@ class PhaseFlowTest(unittest.TestCase):
     def test_phases_two_through_six(self, send_otp):
         def register(name, email, password="test-password"):
             signup(Signup(name=name, email=email, password=password))
-            verify_email(OtpRequest(email=email, otp=send_otp.call_args.args[1]))
+            verify_email(OtpRequest(email=email, otp=send_otp.call_args.args[1]), Response())
             with Session(engine) as db:
                 user = db.scalar(select(User).where(User.email == email))
                 db.expunge(user)
@@ -94,7 +98,14 @@ class PhaseFlowTest(unittest.TestCase):
 
         self.assertTrue(
             update_profile(
-                StudentProfileUpdate(phone="01700000000", current_address="Dhaka"), student_one
+                StudentProfileUpdate(
+                    phone="01700000000",
+                    current_address="Dhaka",
+                    blood_group="O+",
+                    donor_available=True,
+                    donor_contact_visible=True,
+                ),
+                student_one,
             )["profile_completed"]
         )
         with Session(engine) as db:
@@ -195,6 +206,12 @@ class PhaseFlowTest(unittest.TestCase):
         )
         with self.assertRaises(HTTPException):
             admin_user(teacher)
+        self.assertEqual(donors(blood_group="O+", batch_id=None, _=student_two)[0]["phone"], "01700000000")
+        self.assertTrue(notifications(student_one))
+        self.assertGreaterEqual(dashboard(admin)["students"], 2)
+        self.assertEqual(dashboard(student_one)["attendance"], 100.0)
+        self.assertEqual(dashboard(teacher)["classrooms"], 1)
+        self.assertTrue(audit_log(admin))
 
 
 if __name__ == "__main__":

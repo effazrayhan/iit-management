@@ -1,6 +1,6 @@
 # IIT Management
 
-IIT departmental management system through Phase 6: authentication, academic data, student profiles, CR elections, classrooms, attendance, complaints, and anonymous course feedback.
+IIT departmental management system through Phase 8: authentication, academic data, student profiles, CR elections, classrooms, attendance, complaints, anonymous course feedback, dashboards, donor search, notifications, auditing, and production hardening.
 
 ## Requirements
 
@@ -79,6 +79,7 @@ VITE_API_URL=http://localhost:8000
 STUDENT_EMAIL_PATTERN=^bsse(?P<batch>\d{2})(?P<roll>\d{2})@iit\.du\.ac\.bd$
 STAFF_EMAIL_DOMAIN=iit.du.ac.bd
 SUPER_ADMIN_EMAIL=admin@iit.du.ac.bd
+COOKIE_SECURE=false
 ```
 
 | Variable | Used by | Purpose |
@@ -93,6 +94,7 @@ SUPER_ADMIN_EMAIL=admin@iit.du.ac.bd
 | `STUDENT_EMAIL_PATTERN` | Backend | Extracts the student's batch and roll |
 | `STAFF_EMAIL_DOMAIN` | Backend | Permitted staff domain |
 | `SUPER_ADMIN_EMAIL` | Backend | The only email assigned the initial `SUPER_ADMIN` role |
+| `COOKIE_SECURE` | Backend | `false` for local HTTP; `true` for production HTTPS cookies |
 
 The default student policy accepts addresses such as `bsse1501@iit.du.ac.bd`, producing program `BSSE`, batch `15`, and roll `01`. `SUPER_ADMIN_EMAIL` becomes the active super admin after email verification. Other `@iit.du.ac.bd` accounts become pending teachers. All other domains are rejected.
 
@@ -139,8 +141,10 @@ cd ../frontend && npm run build
 5. Teachers create classrooms. Matching students are enrolled automatically; teachers then add class sessions, record attendance, and view anonymous feedback aggregates.
 6. Admins create CR positions and elections, then approve candidates and close elections after voting ends. Students nominate themselves and cast one secret ballot per election.
 7. Students complete profiles, view attendance, submit one anonymous review per enrolled classroom, and submit complaints. Admins move complaints through the required workflow.
+8. Dashboard cards summarize role-specific activity. Students can opt into donor discovery and separately choose whether their phone is visible.
+9. Notifications cover account approval, classrooms, attendance, complaints, nominations, and election results. Admins can inspect the audit log.
 
-Interactive endpoint documentation is available at `/docs` on the backend.
+Interactive endpoint documentation is available at `/docs` on the backend. Authentication uses a seven-day HttpOnly cookie; passwords and tokens are never stored in browser storage.
 
 ## 8. Deploy to Vercel
 
@@ -164,6 +168,7 @@ FRONTEND_URL
 STUDENT_EMAIL_PATTERN
 STAFF_EMAIL_DOMAIN
 SUPER_ADMIN_EMAIL
+COOKIE_SECURE
 ```
 
 4. Initially set `FRONTEND_URL` to `http://localhost:5173` and deploy.
@@ -184,9 +189,30 @@ VITE_API_URL=https://iit-management-api.vercel.app
 ### Connect production URLs
 
 1. In the backend Vercel project, change `FRONTEND_URL` to the frontend production URL and redeploy.
-2. Open the frontend URL, create an account, and test the password-reset email.
+2. Set `COOKIE_SECURE=true` in the backend production environment.
+3. Use sibling custom domains such as `app.example.com` and `api.example.com`. This avoids browsers treating the backend session cookie as a third-party cookie.
+4. Open the frontend URL, create an account, and test login, logout, email verification, and password reset.
 
 Vite variables are embedded during the frontend build, so redeploy after changing any `VITE_*` value. Keep `JWT_SECRET` stable or existing sessions will be invalidated.
+
+## Production checklist
+
+Before each database-changing deployment:
+
+1. Create a restorable Neon branch or snapshot according to your Neon plan.
+2. Deploy against a preview database branch and run `python -m unittest discover -v`.
+3. Verify `/api/health`, login, one role-protected endpoint, and the Vercel function logs.
+4. Run the dependency-free health load probe:
+
+```bash
+cd backend
+LOAD_TEST_URL=https://api.example.com/api/health \
+LOAD_TEST_REQUESTS=500 LOAD_TEST_CONCURRENCY=20 .venv/bin/python load_test.py
+```
+
+5. Pilot with one batch, then a few batches, then teachers, before department-wide access.
+
+Also define the department's retention rules for complaints, feedback, attendance audits, and account deletion; test a Neon restore; rotate SMTP and JWT secrets after exposure; and arrange an independent penetration test before handling real sensitive reports. The built-in auth limiter is per Vercel instance—add a shared Redis-backed limiter when traffic or abuse requires enforcement across instances.
 
 ## Troubleshooting
 
@@ -194,5 +220,6 @@ Vite variables are embedded during the frontend build, so redeploy after changin
 - **Database driver error**: ensure the URL begins with `postgresql+psycopg://`, not `postgresql://`.
 - **`Email service is unavailable`**: confirm 2-Step Verification is enabled and `SMTP_PASSWORD` is an app password without spaces, not the Gmail account password.
 - **CORS error**: make `FRONTEND_URL` exactly match the origin shown in the browser address bar, then restart or redeploy the backend.
+- **Login works locally but not on Vercel**: set `COOKIE_SECURE=true`, ensure frontend requests target HTTPS, and use sibling custom domains so the cookie is first-party/same-site.
 - **Teacher cannot enter**: sign in as `SUPER_ADMIN_EMAIL` and approve the request from the dashboard.
 - **Student rejected**: confirm the address matches `STUDENT_EMAIL_PATTERN` exactly.

@@ -5,8 +5,8 @@ const API = import.meta.env.VITE_API_URL;
 async function request(path, options = {}) {
   const response = await fetch(`${API}${path}`, {
     ...options,
+    credentials: "include",
     headers: {
-      Authorization: `Bearer ${localStorage.getItem("token")}`,
       ...(options.body && { "Content-Type": "application/json" }),
       ...options.headers,
     },
@@ -26,14 +26,18 @@ export default function Dashboard({ user, notify }) {
 
   async function refresh() {
     try {
-      const [academics, classrooms, elections, complaints, positions] = await Promise.all([
+      const [academics, classrooms, elections, complaints, positions, metrics, notifications] = await Promise.all([
         request("/api/academics"), request("/api/classrooms"), request("/api/elections"),
-        request("/api/complaints"), request("/api/cr-positions"),
+        request("/api/complaints"), request("/api/cr-positions"), request("/api/dashboard"),
+        request("/api/notifications"),
       ]);
       const extra = user.role === "STUDENT"
         ? { profile: await request("/api/student/profile"), attendance: await request("/api/student/attendance") }
-        : admin ? { teachers: await request("/api/admin/teachers") } : {};
-      setData({ academics, classrooms, elections, complaints, positions, ...extra });
+        : admin ? {
+          teachers: await request("/api/admin/teachers"),
+          audit: await request("/api/admin/audit"),
+        } : {};
+      setData({ academics, classrooms, elections, complaints, positions, metrics, notifications, ...extra });
     } catch (error) {
       notify(error.message);
     }
@@ -53,9 +57,16 @@ export default function Dashboard({ user, notify }) {
     }
   }
 
-  if (admin) return <Admin data={data} submit={submit} refresh={refresh} notify={notify} />;
-  if (user.role === "TEACHER") return <Teacher data={data} submit={submit} notify={notify} />;
-  return <Student data={data} submit={submit} refresh={refresh} notify={notify} />;
+  const screen = admin
+    ? <Admin data={data} submit={submit} refresh={refresh} notify={notify} />
+    : user.role === "TEACHER"
+      ? <Teacher data={data} submit={submit} notify={notify} />
+      : <Student data={data} submit={submit} refresh={refresh} notify={notify} />;
+  return <>
+    <div className="metrics">{Object.entries(data.metrics || {}).map(([key, value]) => <div key={key}><strong>{value}</strong><small>{key.replaceAll("_", " ")}</small></div>)}</div>
+    {data.notifications?.length > 0 && <div className="panel notices"><h3>Notifications</h3>{data.notifications.map((item) => <button className={item.read ? "read" : ""} key={item.id} onClick={async () => { await request(`/api/notifications/${item.id}/read`, { method: "PATCH" }); await refresh(); }}><strong>{item.title}</strong> — {item.message}</button>)}</div>}
+    {screen}
+  </>;
 }
 
 function Admin({ data, submit, refresh, notify }) {
@@ -131,6 +142,10 @@ function Admin({ data, submit, refresh, notify }) {
         <span><strong>{item.subject}</strong><small>{item.category} · {item.status} · {item.submitter?.email}</small></span>
         {nextStatus[item.status] && <button onClick={() => action(`/api/admin/complaints/${item.id}`, { status: nextStatus[item.status] })}>{nextStatus[item.status].replaceAll("_", " ")}</button>}
       </article>)}
+    </div>
+    <div className="panel">
+      <h3>Recent audit log</h3>
+      {data.audit?.map((item) => <p key={item.id}><strong>{item.action}</strong> {item.entity} #{item.entity_id}<br /><small>{item.actor} · {item.details}</small></p>)}
     </div>
   </div>;
 }
@@ -208,13 +223,15 @@ function Student({ data, submit, refresh, notify }) {
       <div className="panel">
         <h3>My profile</h3>
         <p>{profile.program} · Batch {profile.batch} · Roll {profile.roll}</p>
-        <form onSubmit={(event) => submit(event, "/api/student/profile", "PUT")}>
+        <form onSubmit={(event) => submit(event, "/api/student/profile", "PUT", (form) => ({ ...values(form), donor_available: form.elements.donor_available.checked, donor_contact_visible: form.elements.donor_contact_visible.checked }))}>
           <input name="phone" defaultValue={profile.phone} placeholder="Phone" required />
           <select name="hall_id" defaultValue={profile.hall_id || ""}><option value="">Hall</option>{data.academics.halls?.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select>
           <input name="hometown_district" defaultValue={profile.hometown_district} placeholder="Hometown district" />
           <textarea name="current_address" defaultValue={profile.current_address} placeholder="Current address" required />
           <select name="blood_group" defaultValue={profile.blood_group || ""}><option value="">Blood group</option>{["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].map((x) => <option key={x}>{x}</option>)}</select>
           <input name="last_blood_donation" type="date" defaultValue={profile.last_blood_donation || ""} />
+          <label className="check"><input name="donor_available" type="checkbox" defaultChecked={profile.donor_available} /> Available as blood donor</label>
+          <label className="check"><input name="donor_contact_visible" type="checkbox" defaultChecked={profile.donor_contact_visible} /> Show my phone to signed-in users</label>
           <button>Save profile</button>
         </form>
       </div>
@@ -251,5 +268,25 @@ function Student({ data, submit, refresh, notify }) {
       </form>
       {data.complaints.map((item) => <p key={item.id}><strong>{item.subject}</strong> · {item.status}</p>)}
     </div>
+    <DonorSearch batches={data.academics.batches || []} notify={notify} />
+  </div>;
+}
+
+function DonorSearch({ batches, notify }) {
+  const [results, setResults] = useState([]);
+  async function search(event) {
+    event.preventDefault();
+    const query = new URLSearchParams(values(event.currentTarget));
+    try { setResults(await request(`/api/donors?${query}`)); }
+    catch (error) { notify(error.message); }
+  }
+  return <div className="panel">
+    <h3>Blood donors</h3>
+    <form className="row-form" onSubmit={search}>
+      <select name="blood_group"><option value="">Any blood group</option>{["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].map((x) => <option key={x}>{x}</option>)}</select>
+      <select name="batch_id"><option value="">Any batch</option>{batches.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select>
+      <button>Search</button>
+    </form>
+    {results.map((item, index) => <p key={`${item.name}-${index}`}><strong>{item.name}</strong> · {item.blood_group} · Batch {item.batch}{item.phone && ` · ${item.phone}`}</p>)}
   </div>;
 }

@@ -1,6 +1,7 @@
 import os
 import unittest
 from unittest.mock import patch
+from fastapi import Response
 
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 os.environ.setdefault("JWT_SECRET", "test")
@@ -30,13 +31,15 @@ class EmailPolicyTest(unittest.TestCase):
         email = "bsse9999@iit.du.ac.bd"
         signup(Signup(name="Test Student", email=email, password="old-password"))
         verify_code = send_otp.call_args.args[1]
-        self.assertTrue(verify_email(OtpRequest(email=email, otp=verify_code))["token"])
-        self.assertTrue(signin(Signin(email=email, password="old-password"))["token"])
+        self.assertEqual(verify_email(OtpRequest(email=email, otp=verify_code), Response())["status"], "ACTIVE")
+        response = Response()
+        self.assertEqual(signin(Signin(email=email, password="old-password"), response)["status"], "ACTIVE")
+        self.assertIn("HttpOnly", response.headers["set-cookie"])
 
         forgot_password(EmailRequest(email=email))
         reset_code = send_otp.call_args.args[1]
         reset_password(PasswordReset(email=email, otp=reset_code, password="new-password"))
-        self.assertTrue(signin(Signin(email=email, password="new-password"))["token"])
+        self.assertEqual(signin(Signin(email=email, password="new-password"), Response())["status"], "ACTIVE")
 
     def test_student_identity_is_parsed(self):
         role, status, profile = classify_email("bsse1501@iit.du.ac.bd")
