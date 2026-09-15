@@ -13,7 +13,7 @@ bsse   → program
 iit.du.ac.bd → required student email domain
 ```
 
-After successful Google SSO, the backend should validate the email against a strict regex/policy. Don't trust information sent by the frontend.
+During signup, the backend should validate the email against a strict regex/policy. Don't trust information sent by the frontend.
 
 For example:
 
@@ -33,7 +33,7 @@ Roll    = 01
 
 However, make the parser configurable rather than hard-coding this everywhere. Email conventions can change.
 
-Also, **Google authentication proves control of the Google account; your FastAPI backend must still enforce the permitted domain/email pattern and roles**.
+The FastAPI backend must enforce the permitted domain/email pattern and roles, hash passwords, and verify password-reset OTPs.
 
 ---
 
@@ -76,7 +76,7 @@ Create the initial ERD during this phase.
 
 ---
 
-## Phase 1 — FastAPI foundation + Google SSO
+## Phase 1 — FastAPI foundation + password authentication
 
 This should be your first real development milestone.
 
@@ -90,15 +90,15 @@ FastAPI
 ├── Alembic
 ├── Pydantic
 ├── Redis
-└── Google OAuth / OIDC
+└── Gmail SMTP
 ```
 
-Frontend could be:
+Frontend:
 
 ```text
-Next.js
-TypeScript
-Tailwind CSS
+React
+Vite
+CSS
 ```
 
 Create a clean FastAPI structure early:
@@ -129,20 +129,14 @@ app/
 
 Don't put business logic directly inside route handlers.
 
-### Student Google SSO flow
+### Student signup flow
 
 ```text
 Student
    ↓
-Continue with Google
+Enter name, IIT email and password
    ↓
-Google authentication
-   ↓
-Frontend obtains authentication result
-   ↓
-FastAPI verifies Google identity/token
-   ↓
-Extract verified email
+FastAPI hashes the password
    ↓
 Validate email format/domain
    ↓
@@ -157,12 +151,12 @@ Find/Create StudentProfile
 Issue application session/token
 ```
 
-For students, accept only the configured pattern/domain.
+For students, accept only the configured pattern/domain. Password resets use a short-lived OTP sent through Gmail SMTP.
 
 Teachers need a different policy because their university emails probably won't follow the student roll pattern. I'd use:
 
 ```text
-Google SSO
+Email/password signup
     ↓
 @iit.du.ac.bd
     ↓
@@ -654,7 +648,7 @@ This phase is extremely important because you're handling student information, c
 
 Add:
 
-**Security:** strict RBAC, rate limiting, CSRF/session protections where applicable, secure cookies/token handling, OAuth validation, file-upload validation, authorization tests and secret management.
+**Security:** strict RBAC, rate limiting, CSRF/session protections where applicable, secure cookies/token handling, password/OTP protections, file-upload validation, authorization tests and secret management.
 
 **Data:** database backups, migration procedures, retention policies, soft deletion where appropriate and disaster recovery.
 
@@ -717,8 +711,8 @@ I'd aim for this:
       └──────────────┘                └─────────────┘
 
               ┌──────────────────────────┐
-              │ Google OAuth/OIDC        │
-              │ University Authentication│
+              │ Gmail SMTP               │
+              │ Password reset OTP       │
               └──────────────────────────┘
 
               ┌──────────────────────────┐

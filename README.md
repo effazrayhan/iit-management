@@ -1,13 +1,13 @@
 # IIT Management
 
-Phase 1 of the IIT departmental management system: React, FastAPI, Neon PostgreSQL, Google Sign-In, student email parsing, teacher approval state, and JWT sessions.
+Phase 1 of the IIT departmental management system: React, FastAPI, Neon PostgreSQL, email/password authentication, Gmail OTP password resets, student email parsing, teacher approval state, and JWT sessions.
 
 ## Requirements
 
 - Node.js 20.19+ and npm
 - Python 3.12+
 - A [Neon](https://console.neon.tech/) account
-- A [Google Cloud](https://console.cloud.google.com/) account
+- A Gmail or Google Workspace account for verification and reset emails
 
 ## 1. Clone the repository
 
@@ -35,30 +35,24 @@ The backend creates the `users` and `student_profiles` tables on its first succe
 
 Neon reference: [connect from Python](https://neon.com/docs/guides/python) and [pooled connections](https://neon.com/docs/connect/connection-pooling).
 
-## 3. Create the Google client ID
+## 3. Configure Gmail SMTP
 
-1. Open [Google Auth Platform](https://console.cloud.google.com/auth/overview) and create or select a project.
-2. Complete **Branding** with the app name, support email, and developer email.
-3. Under **Audience**, choose the audience appropriate for your organization. If the app is in testing, add the IIT accounts that will test it as test users.
-4. Open **Clients** → **Create client**.
-5. Select **Web application** and name it `IIT Management Web`.
-6. Add this **Authorized JavaScript origin**:
+Use a dedicated Gmail account rather than a personal mailbox.
 
-```text
-http://localhost:5173
-```
-
-7. Create the client and copy the client ID. A client secret is not used by this app.
-8. Put the same client ID in both variables in `.env`:
+1. Enable [2-Step Verification](https://support.google.com/accounts/answer/185839) on the sender account.
+2. Open [Google App Passwords](https://myaccount.google.com/apppasswords).
+3. Create an app password named `IIT Management` and copy its 16 characters.
+4. Add the mailbox and app password to `.env`. Do not use the normal Gmail password:
 
 ```env
-GOOGLE_CLIENT_ID=123456789-example.apps.googleusercontent.com
-VITE_GOOGLE_CLIENT_ID=123456789-example.apps.googleusercontent.com
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_USER=your-address@gmail.com
+SMTP_PASSWORD=your-16-character-app-password
+SMTP_FROM=your-address@gmail.com
 ```
 
-The frontend receives a Google ID token and the FastAPI backend verifies its signature, issuer, expiry, and audience. No authorized redirect URI is required because the app uses Google's popup callback flow.
-
-Google reference: [create a web client ID](https://developers.google.com/identity/gsi/web/guides/get-google-api-clientid) and [verify ID tokens on a backend](https://developers.google.com/identity/sign-in/web/backend-auth).
+The backend uses SSL on port 465. App passwords require 2-Step Verification and might be unavailable on some managed or Advanced Protection accounts. See Google's [app-password guide](https://support.google.com/accounts/answer/185833) and [SMTP settings](https://support.google.com/a/answer/176600).
 
 ## 4. Configure `.env`
 
@@ -72,12 +66,15 @@ Complete the root `.env`:
 
 ```env
 DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST/DB?sslmode=require&channel_binding=require
-GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
 JWT_SECRET=paste-the-generated-value
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_USER=your-address@gmail.com
+SMTP_PASSWORD=your-16-character-app-password
+SMTP_FROM=your-address@gmail.com
 
 FRONTEND_URL=http://localhost:5173
 VITE_API_URL=http://localhost:8000
-VITE_GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
 
 STUDENT_EMAIL_PATTERN=^bsse(?P<batch>\d{2})(?P<roll>\d{2})@iit\.du\.ac\.bd$
 STAFF_EMAIL_DOMAIN=iit.du.ac.bd
@@ -86,11 +83,12 @@ STAFF_EMAIL_DOMAIN=iit.du.ac.bd
 | Variable | Used by | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | Backend | Neon PostgreSQL connection |
-| `GOOGLE_CLIENT_ID` | Backend | Expected audience while verifying Google ID tokens |
 | `JWT_SECRET` | Backend | Signs seven-day application sessions |
+| `SMTP_HOST` / `SMTP_PORT` | Backend | Gmail SMTP connection; defaults to `smtp.gmail.com:465` |
+| `SMTP_USER` / `SMTP_PASSWORD` | Backend | Gmail address and app password |
+| `SMTP_FROM` | Backend | Sender address; normally the same as `SMTP_USER` |
 | `FRONTEND_URL` | Backend | Allowed CORS origin; do not include a trailing slash |
 | `VITE_API_URL` | Frontend | FastAPI base URL; do not include a trailing slash |
-| `VITE_GOOGLE_CLIENT_ID` | Frontend | Displays Google Sign-In |
 | `STUDENT_EMAIL_PATTERN` | Backend | Extracts the student's batch and roll |
 | `STAFF_EMAIL_DOMAIN` | Backend | Permitted staff domain |
 
@@ -117,7 +115,9 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173) and sign in with an allowed Google account.
+Open [http://localhost:5173](http://localhost:5173), create an account, verify the emailed code, and sign in. Passwords must contain at least eight characters.
+
+Signup verification and the forgot-password wizard email six-digit codes that expire after 10 minutes. Each code has five attempts; password-reset codes can be requested once per minute.
 
 ## 6. Run checks
 
@@ -138,8 +138,12 @@ Create two Vercel projects from the same GitHub repository. See Vercel's [monore
 
 ```text
 DATABASE_URL
-GOOGLE_CLIENT_ID
 JWT_SECRET
+SMTP_HOST
+SMTP_PORT
+SMTP_USER
+SMTP_PASSWORD
+SMTP_FROM
 FRONTEND_URL
 STUDENT_EMAIL_PATTERN
 STAFF_EMAIL_DOMAIN
@@ -156,7 +160,6 @@ STAFF_EMAIL_DOMAIN
 
 ```env
 VITE_API_URL=https://iit-management-api.vercel.app
-VITE_GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
 ```
 
 4. Deploy and copy the frontend URL.
@@ -164,13 +167,7 @@ VITE_GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
 ### Connect production URLs
 
 1. In the backend Vercel project, change `FRONTEND_URL` to the frontend production URL and redeploy.
-2. In the Google web client, add the frontend production URL to **Authorized JavaScript origins** and save:
-
-```text
-https://iit-management.vercel.app
-```
-
-3. Open the frontend URL and sign in.
+2. Open the frontend URL, create an account, and test the password-reset email.
 
 Vite variables are embedded during the frontend build, so redeploy after changing any `VITE_*` value. Keep `JWT_SECRET` stable or existing sessions will be invalidated.
 
@@ -178,8 +175,7 @@ Vite variables are embedded during the frontend build, so redeploy after changin
 
 - **`KeyError: DATABASE_URL`**: the root `.env` is missing or the variable is unset in Vercel.
 - **Database driver error**: ensure the URL begins with `postgresql+psycopg://`, not `postgresql://`.
-- **Google `origin_mismatch`**: add the exact browser origin to Authorized JavaScript origins; include the scheme and port, but no path or trailing slash.
-- **Google access blocked during testing**: add the account under Google Auth Platform → Audience → Test users.
+- **`Email service is unavailable`**: confirm 2-Step Verification is enabled and `SMTP_PASSWORD` is an app password without spaces, not the Gmail account password.
 - **CORS error**: make `FRONTEND_URL` exactly match the origin shown in the browser address bar, then restart or redeploy the backend.
 - **Teacher cannot enter**: expected for now; staff accounts remain `PENDING` until the admin approval endpoint is implemented.
 - **Student rejected**: confirm the address matches `STUDENT_EMAIL_PATTERN` exactly.
