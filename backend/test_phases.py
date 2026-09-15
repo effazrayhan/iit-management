@@ -21,6 +21,7 @@ from api.index import (
     CRElection,
     CRPositionCreate,
     CandidateDecision,
+    ClassPostCreate,
     ClassSessionCreate,
     ClassroomCreate,
     ComplaintCreate,
@@ -43,9 +44,11 @@ from api.index import (
     attendance_summary,
     audit_log,
     close_election,
+    classroom_posts,
     create_academic_setup,
     create_class_session,
     create_classroom,
+    create_class_post,
     create_complaint,
     create_cr_position,
     create_election,
@@ -170,6 +173,19 @@ class PhaseFlowTest(unittest.TestCase):
             ),
             teacher,
         )
+        create_class_post(
+            classroom["id"],
+            ClassPostCreate(
+                kind="RESOURCE",
+                title="Architecture notes",
+                content="Read before the next class.",
+                resource_url="https://example.com/architecture-notes",
+            ),
+            teacher,
+        )
+        posts = classroom_posts(classroom["id"], student_one)
+        self.assertEqual(posts[0]["title"], "Architecture notes")
+        self.assertEqual(posts[0]["kind"], "RESOURCE")
         class_session = create_class_session(
             classroom["id"],
             ClassSessionCreate(

@@ -244,6 +244,19 @@ class ClassSession(Base):
     topic: Mapped[str] = mapped_column(String(255), default="")
 
 
+class ClassPost(Base):
+    __tablename__ = "class_posts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    classroom_id: Mapped[int] = mapped_column(ForeignKey("classrooms.id"), index=True)
+    author_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    kind: Mapped[str] = mapped_column(String(20))
+    title: Mapped[str] = mapped_column(String(255))
+    content: Mapped[str] = mapped_column(Text, default="")
+    resource_url: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class AttendanceRecord(Base):
     __tablename__ = "attendance_records"
     __table_args__ = (UniqueConstraint("class_session_id", "student_id"),)
@@ -476,6 +489,13 @@ class ClassSessionCreate(BaseModel):
     starts_at: time
     ends_at: time
     topic: str = Field(default="", max_length=255)
+
+
+class ClassPostCreate(BaseModel):
+    kind: Literal["ANNOUNCEMENT", "RESOURCE"]
+    title: str = Field(min_length=1, max_length=255)
+    content: str = Field(default="", max_length=4000)
+    resource_url: str | None = Field(default=None, max_length=1000, pattern=r"^https?://.+")
 
 
 class AttendanceItem(BaseModel):
@@ -1342,6 +1362,23 @@ def can_manage_classroom(user: User, classroom: Classroom) -> bool:
     return user.role in {"SUPER_ADMIN", "DEPARTMENT_ADMIN"} or classroom.teacher_id == user.id
 
 
+def can_view_classroom(db: Session, user: User, classroom: Classroom | None) -> bool:
+    if not classroom:
+        return False
+    if can_manage_classroom(user, classroom):
+        return True
+    return bool(
+        user.role == "STUDENT"
+        and db.scalar(
+            select(ClassroomEnrollment.id).where(
+                ClassroomEnrollment.classroom_id == classroom.id,
+                ClassroomEnrollment.student_id == user.id,
+                ClassroomEnrollment.status == "ACTIVE",
+            )
+        )
+    )
+
+
 @app.post("/api/classrooms", status_code=201)
 def create_classroom(body: ClassroomCreate, user: User = Depends(teacher_or_admin)):
     with Session(engine) as db:
@@ -1402,6 +1439,60 @@ def classrooms(user: User = Depends(current_user)):
         return output
 
 
+@app.post("/api/classrooms/{classroom_id}/posts", status_code=201)
+def create_class_post(
+    classroom_id: int, body: ClassPostCreate, user: User = Depends(teacher_or_admin)
+):
+    with Session(engine) as db:
+        classroom = db.get(Classroom, classroom_id)
+        if not classroom or not can_manage_classroom(user, classroom):
+            raise HTTPException(403, "Cannot manage this classroom")
+        if body.kind == "RESOURCE" and not body.resource_url:
+            raise HTTPException(400, "A resource link is required")
+        post = ClassPost(classroom_id=classroom_id, author_id=user.id, **body.model_dump())
+        db.add(post)
+        db.flush()
+        course = db.get(Course, classroom.course_id)
+        for student_id in db.scalars(
+            select(ClassroomEnrollment.student_id).where(
+                ClassroomEnrollment.classroom_id == classroom_id,
+                ClassroomEnrollment.status == "ACTIVE",
+            )
+        ):
+            notify(db, student_id, f"New {body.kind.lower()}", f"{course.code}: {body.title}")
+        audit(db, user.id, "PUBLISH", "class_post", post.id, f"{body.kind}:{body.title}")
+        db.commit()
+        db.refresh(post)
+        return {"id": post.id, "created_at": post.created_at}
+
+
+@app.get("/api/classrooms/{classroom_id}/posts")
+def classroom_posts(classroom_id: int, user: User = Depends(current_user)):
+    with Session(engine) as db:
+        classroom = db.get(Classroom, classroom_id)
+        if not can_view_classroom(db, user, classroom):
+            raise HTTPException(403, "Cannot view this classroom")
+        rows = db.execute(
+            select(ClassPost, User)
+            .join(User, User.id == ClassPost.author_id)
+            .where(ClassPost.classroom_id == classroom_id)
+            .order_by(ClassPost.created_at.desc())
+            .limit(100)
+        )
+        return [
+            {
+                "id": post.id,
+                "kind": post.kind,
+                "title": post.title,
+                "content": post.content,
+                "resource_url": post.resource_url,
+                "author": author.name,
+                "created_at": post.created_at,
+            }
+            for post, author in rows
+        ]
+
+
 @app.post("/api/classrooms/{classroom_id}/sessions", status_code=201)
 def create_class_session(
     classroom_id: int, body: ClassSessionCreate, user: User = Depends(teacher_or_admin)
@@ -1423,13 +1514,7 @@ def create_class_session(
 def classroom_sessions(classroom_id: int, user: User = Depends(current_user)):
     with Session(engine) as db:
         classroom = db.get(Classroom, classroom_id)
-        enrolled = db.scalar(
-            select(ClassroomEnrollment.id).where(
-                ClassroomEnrollment.classroom_id == classroom_id,
-                ClassroomEnrollment.student_id == user.id,
-            )
-        )
-        if not classroom or not (enrolled or can_manage_classroom(user, classroom)):
+        if not can_view_classroom(db, user, classroom):
             raise HTTPException(403, "Cannot view this classroom")
         sessions = []
         for class_session in db.scalars(

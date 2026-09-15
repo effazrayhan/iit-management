@@ -1,6 +1,6 @@
 # IIT Management
 
-IIT departmental management system through Phase 8: authentication, CR-managed academic data, staff administration, student profiles, CR elections, classrooms, attendance, complaints, anonymous course feedback, dashboards, donor search, notifications, auditing, and production hardening.
+IIT departmental management system through Phase 8: authentication, CR-managed academic data, staff administration, a student hub, classroom announcements and resources, attendance, complaints, anonymous course feedback, dashboards, donor search, notifications, auditing, and production hardening.
 
 ## Requirements
 
@@ -135,16 +135,14 @@ cd ../frontend && npm run build
 ## 7. Use the system
 
 1. Sign up with `SUPER_ADMIN_EMAIL` and verify its OTP.
-2. In **Academic setup**, create the program, session, batch, semester, first course, and optional hall. Repeat the form for more courses or batches; existing master records are reused.
+2. Students sign up with the configured address format. BSSE, batch, roll, and academic session are derived automatically from the email.
 3. Teachers sign up and verify their email. The super admin approves them or promotes them to department admin.
-4. Students sign up with the configured address format. Their program, batch, and roll are parsed from the email and matched to the configured batch.
-5. Teachers create classrooms. Matching students are enrolled automatically; teachers then add class sessions, record attendance, and view anonymous feedback aggregates.
-6. Admins create CR positions and elections, then approve candidates and close elections after voting ends. Students nominate themselves and cast one secret ballot per election.
-7. An elected CR chooses the batch display name and current semester, then assigns one or more courses with their course codes, names, and credits. BSSE, batch, and session remain locked to the student email identity.
+4. Admins create CR positions and elections, then approve candidates and close elections after voting ends. Students nominate themselves and cast one secret ballot per election.
+5. An elected CR chooses the batch display name and current semester, then assigns one or more courses with their course codes, names, and credits.
+6. Teachers create classrooms. Matching students are enrolled automatically. Each class workspace supports scheduled sessions, attendance, announcements, resource links, and anonymous feedback aggregates.
+7. Students use **Student Hub → Classes** to see teachers, upcoming sessions, announcements, resources, and course feedback. The hub also provides profile, attendance, elections, complaints, and blood-donor discovery.
 8. The super admin can promote or demote department administrators. Administrators can activate or deactivate eligible staff accounts; the super-admin account and the current user's own account are protected.
-7. Students complete profiles, view attendance, submit one anonymous review per enrolled classroom, and submit complaints. Admins move complaints through the required workflow.
-8. Dashboard cards summarize role-specific activity. Students can opt into donor discovery and separately choose whether their phone is visible.
-9. Notifications cover account approval, classrooms, attendance, complaints, nominations, and election results. Admins can inspect the audit log.
+9. Notifications cover account approval, class posts, classrooms, attendance, complaints, nominations, and election results. Admins can inspect the audit log.
 
 Interactive endpoint documentation is available at `/docs` on the backend. Authentication uses a seven-day HttpOnly cookie; passwords and tokens are never stored in browser storage.
 

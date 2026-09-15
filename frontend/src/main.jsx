@@ -130,11 +130,9 @@ function App() {
   }
 
   const initials = user?.name?.split(" ").map((part) => part[0]).slice(0, 2).join("").toUpperCase();
-  const navigation = [
-    ["overview", "Overview", "grid"],
-    ["workspace", user?.role === "STUDENT" ? "Student hub" : user?.role === "TEACHER" ? "Classes" : "Administration", "folder"],
-    ["notifications", "Notifications", "bell"],
-  ];
+  const navigation = user?.role === "STUDENT"
+    ? [["overview", "Overview", "grid"], ["workspace", "Student hub", "folder"], ["classes", "Classes", "book"], ["notifications", "Notifications", "bell"]]
+    : [["overview", "Overview", "grid"], ["workspace", user?.role === "TEACHER" ? "Classes" : "Administration", "folder"], ["notifications", "Notifications", "bell"]];
 
   return (
     <main className="app-stage">
@@ -202,6 +200,7 @@ function Icon({ name }) {
     campus: <><path d="M3 10 12 4l9 6"/><path d="M5 10h14v9H5zM9 10v9m6-9v9M3 19h18"/></>,
     grid: <><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></>,
     folder: <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/>,
+    book: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v17H6.5A2.5 2.5 0 0 0 4 22z"/><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v17h4.5A2.5 2.5 0 0 1 20 22z"/></>,
     bell: <><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7"/><path d="M10 20h4"/></>,
     logout: <><path d="M10 5H5v14h5M14 8l4 4-4 4m4-4H9"/></>,
     search: <><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></>,

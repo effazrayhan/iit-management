@@ -172,8 +172,17 @@ function Teacher({ data, submit, notify }) {
 
 function TeacherClassroom({ classroom, notify }) {
   const [details, setDetails] = useState({ sessions: [], roster: [] });
+  const [posts, setPosts] = useState([]);
+  const [postKind, setPostKind] = useState("ANNOUNCEMENT");
   const [feedback, setFeedback] = useState(null);
-  async function load() { setDetails(await request(`/api/classrooms/${classroom.id}/sessions`)); }
+  async function load() {
+    const [classDetails, classPosts] = await Promise.all([
+      request(`/api/classrooms/${classroom.id}/sessions`),
+      request(`/api/classrooms/${classroom.id}/posts`),
+    ]);
+    setDetails(classDetails);
+    setPosts(classPosts);
+  }
   useEffect(() => { load(); }, []);
 
   async function addSession(event) {
@@ -194,9 +203,20 @@ function TeacherClassroom({ classroom, notify }) {
     } catch (error) { notify(error.message); }
   }
 
-  return <div className="panel">
-    <h3>{classroom.course_code} — {classroom.course_name}</h3>
-    <p>{classroom.batch_name} · Section {classroom.section}</p>
+  async function publish(event) {
+    event.preventDefault();
+    try {
+      await request(`/api/classrooms/${classroom.id}/posts`, { method: "POST", body: JSON.stringify(values(event.currentTarget)) });
+      event.currentTarget.reset();
+      setPostKind("ANNOUNCEMENT");
+      notify("Published to the class.");
+      await load();
+    } catch (error) { notify(error.message); }
+  }
+
+  return <div className="panel class-workspace">
+    <div className="class-header"><span className="class-code">{classroom.course_code}</span><span><h3>{classroom.course_name}</h3><small>{classroom.batch_name} · Section {classroom.section} · {details.roster.length} students</small></span></div>
+    <h4>Schedule a class</h4>
     <form className="row-form" onSubmit={addSession}>
       <input name="session_date" type="date" required />
       <input name="starts_at" type="time" required />
@@ -204,8 +224,18 @@ function TeacherClassroom({ classroom, notify }) {
       <input name="topic" placeholder="Topic" />
       <button>Add class</button>
     </form>
+    <h4>Publish to class</h4>
+    <form className="post-composer" onSubmit={publish}>
+      <select name="kind" value={postKind} onChange={(event) => setPostKind(event.target.value)}><option value="ANNOUNCEMENT">Announcement</option><option value="RESOURCE">Resource</option></select>
+      <input name="title" placeholder="Title" required />
+      <textarea name="content" placeholder="Message or instructions" />
+      {postKind === "RESOURCE" && <input name="resource_url" type="url" placeholder="https://…" required />}
+      <button>Publish</button>
+    </form>
+    <ClassFeed posts={posts} />
+    <h4>Attendance sessions</h4>
     {details.sessions.map((session) => <form className="attendance" key={session.id} onSubmit={(event) => attendance(event, session.id)}>
-      <strong>{session.date} · {session.topic}</strong>
+      <strong>{formatDate(session.date)} · {formatTime(session.starts_at)}–{formatTime(session.ends_at)} · {session.topic || "Class session"}</strong>
       {details.roster.map((student) => <label key={student.id}>{student.name}<select name={student.id} defaultValue={session.attendance.find((x) => x.student_id === student.id)?.status || "PRESENT"}>{["PRESENT", "ABSENT", "LATE", "EXCUSED"].map((x) => <option key={x}>{x}</option>)}</select></label>)}
       <button>Save attendance</button>
     </form>)}
@@ -221,7 +251,11 @@ function Student({ data, submit, refresh, notify }) {
     catch (error) { notify(error.message); }
   }
 
-  return <div className="workspace">
+  return <div className="workspace student-hub">
+    <div className="hub-hero">
+      <div><p className="eyebrow">Student hub</p><h2>{profile.batch_name || `Batch ${profile.batch}`}</h2><p>BSSE · Session {profile.academic_session} · {profile.semester_number ? `Semester ${profile.semester_number}` : "Semester pending"}</p></div>
+      <div className="hub-actions"><button onClick={() => document.getElementById("classes")?.scrollIntoView({ behavior: "smooth" })}>My classes</button><button className="secondary" onClick={() => document.getElementById("complaints")?.scrollIntoView({ behavior: "smooth" })}>Get support</button></div>
+    </div>
     <div className="grid">
       <div className="panel">
         <h3>My profile</h3>
@@ -244,7 +278,11 @@ function Student({ data, submit, refresh, notify }) {
       </div>
       {profile.is_cr && <CRAcademicSetup profile={profile} submit={submit} />}
     </div>
-    <div className="panel">
+    <section id="classes" className="hub-section">
+      <div className="section-heading"><span><small>Learning</small><h2>My classes</h2></span><span className="count-badge">{data.classrooms.length}</span></div>
+      <div className="class-grid">{data.classrooms.length ? data.classrooms.map((classroom) => <StudentClassroom key={classroom.id} classroom={classroom} notify={notify} />) : <div className="panel empty-state"><strong>No classes yet</strong><p>Your enrolled classes will appear here after a teacher creates them.</p></div>}</div>
+    </section>
+    <div id="elections" className="panel">
       <h3>CR elections</h3>
       {data.elections.map((election) => <div className="election" key={election.id}>
         <strong>{election.title}</strong><small>{election.position}</small>
@@ -252,7 +290,7 @@ function Student({ data, submit, refresh, notify }) {
         {election.candidates.filter((x) => x.status === "APPROVED").map((candidate) => <button key={candidate.id} disabled={election.has_voted} onClick={() => electionAction(`/api/elections/${election.id}/vote`, { candidate_id: candidate.id })}>Vote for {candidate.name}</button>)}
       </div>)}
     </div>
-    <div className="panel">
+    <div id="feedback" className="panel">
       <h3>Course feedback</h3>
       {data.classrooms.map((classroom) => <form className="feedback" key={classroom.id} onSubmit={(event) => submit(event, `/api/classrooms/${classroom.id}/feedback`)}>
         <strong>{classroom.course_code} — {classroom.course_name}</strong>
@@ -261,7 +299,7 @@ function Student({ data, submit, refresh, notify }) {
         <button>Submit anonymously</button>
       </form>)}
     </div>
-    <div className="panel">
+    <div id="complaints" className="panel">
       <h3>Complaints</h3>
       <form onSubmit={(event) => submit(event, "/api/complaints", "POST", (form) => ({ ...values(form), confidential: form.elements.confidential.checked }))}>
         <select name="category" required>{["ACADEMIC", "CLASSROOM", "LAB", "FACILITIES", "TEACHER", "ADMINISTRATION", "HARASSMENT_SAFETY", "OTHER"].map((x) => <option key={x}>{x}</option>)}</select>
@@ -272,8 +310,51 @@ function Student({ data, submit, refresh, notify }) {
       </form>
       {data.complaints.map((item) => <p key={item.id}><strong>{item.subject}</strong> · {item.status}</p>)}
     </div>
-    <DonorSearch batches={data.academics.batches || []} notify={notify} />
+    <div id="donors"><DonorSearch batches={data.academics.batches || []} notify={notify} /></div>
   </div>;
+}
+
+function StudentClassroom({ classroom, notify }) {
+  const [details, setDetails] = useState({ sessions: [] });
+  const [posts, setPosts] = useState([]);
+  useEffect(() => {
+    Promise.all([
+      request(`/api/classrooms/${classroom.id}/sessions`),
+      request(`/api/classrooms/${classroom.id}/posts`),
+    ]).then(([classDetails, classPosts]) => {
+      setDetails(classDetails);
+      setPosts(classPosts);
+    }).catch((error) => notify(error.message));
+  }, [classroom.id]);
+  const nextSession = [...details.sessions]
+    .filter((session) => new Date(`${session.date}T${session.ends_at}`) >= new Date())
+    .sort((a, b) => `${a.date}${a.starts_at}`.localeCompare(`${b.date}${b.starts_at}`))[0];
+  return <article className="student-class-card">
+    <div className="class-header"><span className="class-code">{classroom.course_code}</span><span><h3>{classroom.course_name}</h3><small>{classroom.teacher_name} · Section {classroom.section}</small></span></div>
+    <div className="next-class">{nextSession ? <><small>Next class</small><strong>{formatDate(nextSession.date)} at {formatTime(nextSession.starts_at)}</strong><span>{nextSession.topic || "Class session"}</span></> : <><small>Schedule</small><strong>No upcoming class</strong><span>Check back for updates.</span></>}</div>
+    <ClassFeed posts={posts.slice(0, 3)} compact />
+  </article>;
+}
+
+function ClassFeed({ posts, compact = false }) {
+  return <div className={`class-feed ${compact ? "compact" : ""}`}>
+    {!compact && <h4>Class feed</h4>}
+    {posts.length ? posts.map((post) => <article className="class-post" key={post.id}>
+      <span className={`post-kind ${post.kind.toLowerCase()}`}>{post.kind === "RESOURCE" ? "↗" : "•"}</span>
+      <span><strong>{post.title}</strong><small>{post.kind.toLowerCase()} · {post.author} · {formatDate(post.created_at)}</small>{post.content && <p>{post.content}</p>}{post.resource_url && <a href={post.resource_url} target="_blank" rel="noreferrer">Open resource</a>}</span>
+    </article>) : <p className="empty-copy">No class updates yet.</p>}
+  </div>;
+}
+
+function formatDate(value) {
+  if (!value) return "";
+  return new Intl.DateTimeFormat("en", { month: "short", day: "numeric", year: "numeric" }).format(new Date(`${value}`.slice(0, 10) + "T00:00:00"));
+}
+
+function formatTime(value) {
+  if (!value) return "";
+  const [hours, minutes] = value.split(":");
+  return new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit" }).format(new Date(2000, 0, 1, Number(hours), Number(minutes)));
 }
 
 function CRAcademicSetup({ profile, submit }) {
