@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import Dashboard from "./Dashboard";
 import "./style.css";
 
 const API = import.meta.env.VITE_API_URL;
@@ -10,7 +11,6 @@ function App() {
   const [form, setForm] = useState({ name: "", email: "", password: "", otp: "" });
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  const [teachers, setTeachers] = useState([]);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -19,15 +19,6 @@ function App() {
         .then((response) => response.ok && response.json())
         .then((data) => data && setUser(data));
   }, []);
-
-  useEffect(() => {
-    if (user && ["SUPER_ADMIN", "DEPARTMENT_ADMIN"].includes(user.role))
-      fetch(`${API}/api/admin/teachers`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
-      })
-        .then((response) => response.ok && response.json())
-        .then((data) => data && setTeachers(data));
-  }, [user]);
 
   function update(event) {
     setForm({ ...form, [event.target.name]: event.target.value });
@@ -109,40 +100,16 @@ function App() {
     setUser(null);
   }
 
-  async function decide(teacherId, action) {
-    const response = await fetch(`${API}/api/admin/teachers/${teacherId}`, {
-      method: "PATCH",
-      headers: {
-        Authorization: `Bearer ${localStorage.getItem("token")}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ action }),
-    });
-    if (response.ok) setTeachers(teachers.filter(({ id }) => id !== teacherId));
-    else setMessage("Could not update the teacher account.");
-  }
-
   return (
     <main>
-      <section>
+      <section className={user ? "dashboard" : ""}>
         <p className="eyebrow">University of Dhaka</p>
         <h1>IIT Management</h1>
         {user ? (
           <>
             <h2>Welcome, {user.name}</h2>
             <p>{user.email} · {user.role}</p>
-            {["SUPER_ADMIN", "DEPARTMENT_ADMIN"].includes(user.role) && (
-              <div className="requests">
-                <h3>Pending teachers</h3>
-                {teachers.length ? teachers.map((teacher) => (
-                  <article key={teacher.id}>
-                    <span><strong>{teacher.name}</strong><small>{teacher.email}</small></span>
-                    <button onClick={() => decide(teacher.id, "APPROVE")}>Approve</button>
-                    <button className="reject" onClick={() => decide(teacher.id, "REJECT")}>Reject</button>
-                  </article>
-                )) : <p>No pending requests.</p>}
-              </div>
-            )}
+            <Dashboard user={user} notify={setMessage} />
             <button onClick={logout}>Sign out</button>
           </>
         ) : (

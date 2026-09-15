@@ -1,6 +1,6 @@
 # IIT Management
 
-Phase 1 of the IIT departmental management system: React, FastAPI, Neon PostgreSQL, email/password authentication, Gmail OTP password resets, student email parsing, teacher approval state, and JWT sessions.
+IIT departmental management system through Phase 6: authentication, academic data, student profiles, CR elections, classrooms, attendance, complaints, and anonymous course feedback.
 
 ## Requirements
 
@@ -31,7 +31,7 @@ cp .env.example .env
 DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST-pooler.REGION.aws.neon.tech/neondb?sslmode=require&channel_binding=require
 ```
 
-The backend creates the `users` and `student_profiles` tables on its first successful start. No manual SQL is needed.
+The backend creates its tables on the first successful start and adds missing Phase 2 fields to an existing Phase 1 database. No manual SQL is needed.
 
 Neon reference: [connect from Python](https://neon.com/docs/guides/python) and [pooled connections](https://neon.com/docs/connect/connection-pooling).
 
@@ -126,11 +126,23 @@ Signup verification and the forgot-password wizard email six-digit codes that ex
 ## 6. Run checks
 
 ```bash
-cd backend && .venv/bin/python -m unittest -v test_email_policy.py
+cd backend && .venv/bin/python -m unittest discover -v
 cd ../frontend && npm run build
 ```
 
-## 7. Deploy to Vercel
+## 7. Use the system
+
+1. Sign up with `SUPER_ADMIN_EMAIL` and verify its OTP.
+2. In **Academic setup**, create the program, session, batch, semester, first course, and optional hall. Repeat the form for more courses or batches; existing master records are reused.
+3. Teachers sign up and verify their email. The super admin approves them or promotes them to department admin.
+4. Students sign up with the configured address format. Their program, batch, and roll are parsed from the email and matched to the configured batch.
+5. Teachers create classrooms. Matching students are enrolled automatically; teachers then add class sessions, record attendance, and view anonymous feedback aggregates.
+6. Admins create CR positions and elections, then approve candidates and close elections after voting ends. Students nominate themselves and cast one secret ballot per election.
+7. Students complete profiles, view attendance, submit one anonymous review per enrolled classroom, and submit complaints. Admins move complaints through the required workflow.
+
+Interactive endpoint documentation is available at `/docs` on the backend.
+
+## 8. Deploy to Vercel
 
 Create two Vercel projects from the same GitHub repository. See Vercel's [monorepo setup](https://vercel.com/docs/monorepos), [FastAPI guide](https://vercel.com/docs/frameworks/backend/fastapi), and [Vite guide](https://vercel.com/docs/frameworks/frontend/vite).
 
