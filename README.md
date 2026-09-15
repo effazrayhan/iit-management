@@ -78,6 +78,7 @@ VITE_API_URL=http://localhost:8000
 
 STUDENT_EMAIL_PATTERN=^bsse(?P<batch>\d{2})(?P<roll>\d{2})@iit\.du\.ac\.bd$
 STAFF_EMAIL_DOMAIN=iit.du.ac.bd
+SUPER_ADMIN_EMAIL=admin@iit.du.ac.bd
 ```
 
 | Variable | Used by | Purpose |
@@ -91,8 +92,11 @@ STAFF_EMAIL_DOMAIN=iit.du.ac.bd
 | `VITE_API_URL` | Frontend | FastAPI base URL; do not include a trailing slash |
 | `STUDENT_EMAIL_PATTERN` | Backend | Extracts the student's batch and roll |
 | `STAFF_EMAIL_DOMAIN` | Backend | Permitted staff domain |
+| `SUPER_ADMIN_EMAIL` | Backend | The only email assigned the initial `SUPER_ADMIN` role |
 
-The default student policy accepts addresses such as `bsse1501@iit.du.ac.bd`, producing program `BSSE`, batch `15`, and roll `01`. Other `@iit.du.ac.bd` accounts become pending teachers. All other domains are rejected.
+The default student policy accepts addresses such as `bsse1501@iit.du.ac.bd`, producing program `BSSE`, batch `15`, and roll `01`. `SUPER_ADMIN_EMAIL` becomes the active super admin after email verification. Other `@iit.du.ac.bd` accounts become pending teachers. All other domains are rejected.
+
+Set `SUPER_ADMIN_EMAIL` to your real email before signup. If that address already has a verified account, signing in once upgrades it to `SUPER_ADMIN`.
 
 ## 5. Run locally
 
@@ -147,6 +151,7 @@ SMTP_FROM
 FRONTEND_URL
 STUDENT_EMAIL_PATTERN
 STAFF_EMAIL_DOMAIN
+SUPER_ADMIN_EMAIL
 ```
 
 4. Initially set `FRONTEND_URL` to `http://localhost:5173` and deploy.
@@ -177,5 +182,5 @@ Vite variables are embedded during the frontend build, so redeploy after changin
 - **Database driver error**: ensure the URL begins with `postgresql+psycopg://`, not `postgresql://`.
 - **`Email service is unavailable`**: confirm 2-Step Verification is enabled and `SMTP_PASSWORD` is an app password without spaces, not the Gmail account password.
 - **CORS error**: make `FRONTEND_URL` exactly match the origin shown in the browser address bar, then restart or redeploy the backend.
-- **Teacher cannot enter**: expected for now; staff accounts remain `PENDING` until the admin approval endpoint is implemented.
+- **Teacher cannot enter**: sign in as `SUPER_ADMIN_EMAIL` and approve the request from the dashboard.
 - **Student rejected**: confirm the address matches `STUDENT_EMAIL_PATTERN` exactly.

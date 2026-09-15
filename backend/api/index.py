@@ -9,6 +9,7 @@ import ssl
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
+from typing import Literal
 
 import jwt
 from dotenv import load_dotenv
@@ -28,6 +29,7 @@ STUDENT_EMAIL_PATTERN = os.getenv(
     r"^bsse(?P<batch>\d{2})(?P<roll>\d{2})@iit\.du\.ac\.bd$",
 )
 STAFF_EMAIL_DOMAIN = os.getenv("STAFF_EMAIL_DOMAIN", "iit.du.ac.bd")
+SUPER_ADMIN_EMAIL = os.getenv("SUPER_ADMIN_EMAIL", "").strip().lower()
 
 
 class Base(DeclarativeBase):
@@ -105,6 +107,10 @@ class PasswordReset(EmailRequest):
 
 class OtpRequest(EmailRequest):
     otp: str = Field(pattern=r"^\d{6}$")
+
+
+class TeacherDecision(BaseModel):
+    action: Literal["APPROVE", "REJECT"]
 
 
 def classify_email(email: str) -> tuple[str, str, dict[str, str] | None]:
@@ -196,8 +202,16 @@ def current_user(authorization: str = Header()) -> User:
         user = db.get(User, user_id)
         if not user or user.status != "ACTIVE":
             raise HTTPException(403, "Account is not active")
+        if user.role == "SUPER_ADMIN" and user.email != SUPER_ADMIN_EMAIL:
+            raise HTTPException(403, "Super admin is no longer configured")
         db.expunge(user)
         return user
+
+
+def admin_user(user: User = Depends(current_user)) -> User:
+    if user.role not in {"SUPER_ADMIN", "DEPARTMENT_ADMIN"}:
+        raise HTTPException(403, "Admin access required")
+    return user
 
 
 @app.get("/api/health")
@@ -209,7 +223,12 @@ def health():
 def signup(body: Signup):
     try:
         email = body.email.strip().lower()
-        role, _, student = classify_email(email)
+        if email == SUPER_ADMIN_EMAIL:
+            if not re.fullmatch(r"[^@\s]+@[^@\s]+", email):
+                raise ValueError("Enter a valid email address")
+            role, student = "SUPER_ADMIN", None
+        else:
+            role, _, student = classify_email(email)
         if not body.name.strip():
             raise ValueError("Enter your name")
     except ValueError as error:
@@ -282,7 +301,7 @@ def verify_email(body: OtpRequest):
                 user.otp_attempts -= 1
                 db.commit()
             raise HTTPException(400, "Invalid or expired verification code")
-        user.status = "ACTIVE" if user.role == "STUDENT" else "PENDING"
+        user.status = "ACTIVE" if user.role in {"STUDENT", "SUPER_ADMIN"} else "PENDING"
         user.otp_digest = None
         user.otp_purpose = None
         user.otp_expires = None
@@ -305,6 +324,11 @@ def signin(body: Signin):
             raise HTTPException(401, "Invalid email or password")
         if user.status == "UNVERIFIED":
             raise HTTPException(403, "Email is not verified")
+        if email == SUPER_ADMIN_EMAIL:
+            user.role = "SUPER_ADMIN"
+            user.status = "ACTIVE"
+            db.commit()
+            db.refresh(user)
         if user.status != "ACTIVE":
             raise HTTPException(403, "Account is awaiting admin approval")
         return {
@@ -365,3 +389,24 @@ def reset_password(body: PasswordReset):
 @app.get("/api/me")
 def me(user: User = Depends(current_user)):
     return {"email": user.email, "name": user.name, "role": user.role}
+
+
+@app.get("/api/admin/teachers")
+def pending_teachers(_: User = Depends(admin_user)):
+    with Session(engine) as db:
+        teachers = db.scalars(
+            select(User).where(User.role == "TEACHER", User.status == "PENDING").order_by(User.name)
+        ).all()
+        return [{"id": user.id, "name": user.name, "email": user.email} for user in teachers]
+
+
+@app.patch("/api/admin/teachers/{teacher_id}")
+def decide_teacher(teacher_id: int, body: TeacherDecision, _: User = Depends(admin_user)):
+    with Session(engine) as db:
+        teacher = db.get(User, teacher_id)
+        if not teacher or teacher.role != "TEACHER" or teacher.status != "PENDING":
+            raise HTTPException(404, "Pending teacher not found")
+        status = "ACTIVE" if body.action == "APPROVE" else "REJECTED"
+        teacher.status = status
+        db.commit()
+    return {"status": status}

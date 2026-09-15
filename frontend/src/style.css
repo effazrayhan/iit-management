@@ -18,3 +18,9 @@ input { width: 100%; border: 1px solid #bdcac2; border-radius: 8px; padding: 12p
 input:focus { outline: 2px solid #55a87a; border-color: transparent; }
 .forgot { width: 100%; margin-top: 8px; }
 [role="status"] { margin-top: 20px; color: #925b00; }
+.requests { margin: 32px 0; }
+article { display: flex; align-items: center; gap: 8px; padding: 12px 0; border-top: 1px solid #e2e9e4; }
+article span { flex: 1; }
+article small { display: block; margin-top: 3px; color: #607068; }
+article button { padding: 8px 10px; }
+.reject { background: #a12828; }

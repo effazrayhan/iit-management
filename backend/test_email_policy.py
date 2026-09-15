@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 os.environ.setdefault("JWT_SECRET", "test")
+os.environ.setdefault("SUPER_ADMIN_EMAIL", "admin@iit.du.ac.bd")
 
 from api.index import (
     EmailRequest,
@@ -11,16 +12,25 @@ from api.index import (
     PasswordReset,
     Signin,
     Signup,
+    TeacherDecision,
+    User,
+    admin_user,
     classify_email,
+    decide_teacher,
+    engine,
     forgot_password,
     hash_password,
     otp_hash,
+    pending_teachers,
     reset_password,
     signin,
     signup,
     verify_email,
     verify_password,
 )
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+from fastapi import HTTPException
 
 
 class EmailPolicyTest(unittest.TestCase):
@@ -36,6 +46,28 @@ class EmailPolicyTest(unittest.TestCase):
         reset_code = send_otp.call_args.args[1]
         reset_password(PasswordReset(email=email, otp=reset_code, password="new-password"))
         self.assertTrue(signin(Signin(email=email, password="new-password"))["token"])
+
+    @patch("api.index.send_otp")
+    def test_super_admin_approves_teacher(self, send_otp):
+        signup(Signup(name="Admin", email="admin@iit.du.ac.bd", password="admin-password"))
+        admin_code = send_otp.call_args.args[1]
+        verify_email(OtpRequest(email="admin@iit.du.ac.bd", otp=admin_code))
+
+        signup(Signup(name="Teacher", email="teacher@iit.du.ac.bd", password="teacher-password"))
+        teacher_code = send_otp.call_args.args[1]
+        verify_email(OtpRequest(email="teacher@iit.du.ac.bd", otp=teacher_code))
+
+        with Session(engine) as db:
+            admin = db.scalar(select(User).where(User.email == "admin@iit.du.ac.bd"))
+            db.expunge(admin)
+        teacher = pending_teachers(admin)[0]
+        decide_teacher(teacher["id"], TeacherDecision(action="APPROVE"), admin)
+        self.assertTrue(signin(Signin(email="teacher@iit.du.ac.bd", password="teacher-password"))["token"])
+        with Session(engine) as db:
+            teacher_user = db.scalar(select(User).where(User.email == "teacher@iit.du.ac.bd"))
+            db.expunge(teacher_user)
+        with self.assertRaises(HTTPException):
+            admin_user(teacher_user)
 
     def test_student_identity_is_parsed(self):
         role, status, profile = classify_email("bsse1501@iit.du.ac.bd")
