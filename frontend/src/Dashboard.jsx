@@ -63,9 +63,9 @@ export default function Dashboard({ user, notify }) {
       ? <Teacher data={data} submit={submit} notify={notify} />
       : <Student data={data} submit={submit} refresh={refresh} notify={notify} />;
   return <>
-    <div className="metrics">{Object.entries(data.metrics || {}).map(([key, value]) => <div key={key}><strong>{value}</strong><small>{key.replaceAll("_", " ")}</small></div>)}</div>
-    {data.notifications?.length > 0 && <div className="panel notices"><h3>Notifications</h3>{data.notifications.map((item) => <button className={item.read ? "read" : ""} key={item.id} onClick={async () => { await request(`/api/notifications/${item.id}/read`, { method: "PATCH" }); await refresh(); }}><strong>{item.title}</strong> — {item.message}</button>)}</div>}
-    {screen}
+    <div id="overview" className="metrics">{Object.entries(data.metrics || {}).map(([key, value]) => <div key={key}><span className="metric-icon" aria-hidden="true">{key.includes("student") ? "◉" : key.includes("teacher") ? "◇" : key.includes("complaint") ? "!" : "↗"}</span><strong>{value}</strong><small>{key.replaceAll("_", " ")}</small></div>)}</div>
+    {data.notifications?.length > 0 && <div id="notifications" className="panel notices"><div className="panel-heading"><span><small>Updates</small><h3>Notifications</h3></span><span className="count-badge">{data.notifications.length}</span></div>{data.notifications.map((item) => <button className={item.read ? "read" : ""} key={item.id} onClick={async () => { await request(`/api/notifications/${item.id}/read`, { method: "PATCH" }); await refresh(); }}><span className="notice-dot" /><span><strong>{item.title}</strong><small>{item.message}</small></span></button>)}</div>}
+    <div id="workspace">{screen}</div>
   </>;
 }
 
