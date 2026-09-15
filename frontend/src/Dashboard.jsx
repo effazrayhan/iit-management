@@ -35,6 +35,7 @@ export default function Dashboard({ user, notify }) {
         ? { profile: await request("/api/student/profile"), attendance: await request("/api/student/attendance") }
         : admin ? {
           teachers: await request("/api/admin/teachers"),
+          staff: await request("/api/admin/users"),
           audit: await request("/api/admin/audit"),
         } : {};
       setData({ academics, classrooms, elections, complaints, positions, metrics, notifications, ...extra });
@@ -58,7 +59,7 @@ export default function Dashboard({ user, notify }) {
   }
 
   const screen = admin
-    ? <Admin data={data} submit={submit} refresh={refresh} notify={notify} />
+    ? <Admin user={user} data={data} submit={submit} refresh={refresh} notify={notify} />
     : user.role === "TEACHER"
       ? <Teacher data={data} submit={submit} notify={notify} />
       : <Student data={data} submit={submit} refresh={refresh} notify={notify} />;
@@ -69,7 +70,7 @@ export default function Dashboard({ user, notify }) {
   </>;
 }
 
-function Admin({ data, submit, refresh, notify }) {
+function Admin({ user, data, submit, refresh, notify }) {
   const nextStatus = { SUBMITTED: "ACKNOWLEDGED", ACKNOWLEDGED: "UNDER_REVIEW", UNDER_REVIEW: "ASSIGNED", ASSIGNED: "ACTION_TAKEN", ACTION_TAKEN: "RESOLVED" };
   async function action(path, body) {
     try {
@@ -81,21 +82,13 @@ function Admin({ data, submit, refresh, notify }) {
   return <div className="workspace">
     <div className="grid">
       <div className="panel">
-        <h3>Academic setup</h3>
-        <form onSubmit={(event) => submit(event, "/api/admin/academic-setup")}>
-          <input name="program_code" placeholder="Program code (BSSE)" required />
-          <input name="program_name" placeholder="Program name" required />
-          <input name="academic_session" placeholder="Session (2022-23)" required />
-          <input name="batch_code" placeholder="Batch code (15)" required />
-          <input name="batch_name" placeholder="Batch name" required />
-          <input name="semester_number" type="number" min="1" max="20" placeholder="Semester number" required />
-          <input name="semester_name" placeholder="Semester name" required />
-          <input name="course_code" placeholder="Course code" required />
-          <input name="course_name" placeholder="Course name" required />
-          <input name="credits" type="number" min="1" max="10" placeholder="Credits" required />
-          <input name="hall_name" placeholder="Hall (optional)" />
-          <button>Save academic data</button>
-        </form>
+        <h3>Academic administration</h3>
+        <p className="helper">BSSE batches and sessions are created automatically from student IIT email addresses. Elected CRs maintain batch names, semesters, and course plans.</p>
+        <div className="compact-list">{data.academics.batches?.map((batch) => {
+          const session = data.academics.sessions?.find((item) => item.id === batch.session_id);
+          const semester = data.academics.semesters?.find((item) => item.id === batch.current_semester_id);
+          return <p key={batch.id}><strong>{batch.name}</strong><small>BSSE {batch.code} · {session?.name} · {semester ? `Semester ${semester.number}` : "Semester not assigned"}</small></p>;
+        })}</div>
       </div>
       <div className="panel">
         <h3>Teacher requests</h3>
@@ -105,6 +98,16 @@ function Admin({ data, submit, refresh, notify }) {
           <button className="secondary" onClick={() => action(`/api/admin/teachers/${teacher.id}`, { action: "MAKE_ADMIN" })}>Make admin</button>
           <button className="reject" onClick={() => action(`/api/admin/teachers/${teacher.id}`, { action: "REJECT" })}>Reject</button>
         </article>) : <p>No pending requests.</p>}
+      </div>
+      <div className="panel">
+        <h3>Staff administration</h3>
+        {data.staff?.map((member) => <article key={member.id}>
+          <span><strong>{member.name}</strong><small>{member.email} · {member.role.replaceAll("_", " ")} · {member.status}</small></span>
+          {member.email !== user.email && member.role !== "SUPER_ADMIN" && <>
+            {user.role === "SUPER_ADMIN" && <button className="secondary" onClick={() => action(`/api/admin/users/${member.id}`, { action: member.role === "DEPARTMENT_ADMIN" ? "MAKE_TEACHER" : "MAKE_ADMIN" })}>{member.role === "DEPARTMENT_ADMIN" ? "Make teacher" : "Make admin"}</button>}
+            <button className={member.status === "ACTIVE" ? "reject" : "secondary"} onClick={() => action(`/api/admin/users/${member.id}`, { action: member.status === "ACTIVE" ? "DEACTIVATE" : "ACTIVATE" })}>{member.status === "ACTIVE" ? "Deactivate" : "Activate"}</button>
+          </>}
+        </article>)}
       </div>
       <div className="panel">
         <h3>CR position</h3>
@@ -157,7 +160,7 @@ function Teacher({ data, submit, notify }) {
       <form className="row-form" onSubmit={(event) => submit(event, "/api/classrooms")}>
         <select name="course_id" required><option value="">Course</option>{data.academics.courses?.map((x) => <option key={x.id} value={x.id}>{x.code} — {x.name}</option>)}</select>
         <select name="batch_id" required><option value="">Batch</option>{data.academics.batches?.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select>
-        <select name="semester_id" required><option value="">Semester</option>{data.academics.semesters?.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select>
+        <select name="semester_id" required><option value="">Semester</option>{data.academics.semesters?.map((x) => <option key={x.id} value={x.id}>Semester {x.number}</option>)}</select>
         <select name="session_id" required><option value="">Session</option>{data.academics.sessions?.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select>
         <input name="section" defaultValue="A" placeholder="Section" required />
         <button>Create</button>
@@ -222,7 +225,7 @@ function Student({ data, submit, refresh, notify }) {
     <div className="grid">
       <div className="panel">
         <h3>My profile</h3>
-        <p>{profile.program} · Batch {profile.batch} · Roll {profile.roll}</p>
+        <p>{profile.program} · {profile.batch_name || `Batch ${profile.batch}`} · Session {profile.academic_session} · {profile.semester_number ? `Semester ${profile.semester_number}` : "Semester not assigned"} · Roll {profile.roll}</p>
         <form onSubmit={(event) => submit(event, "/api/student/profile", "PUT", (form) => ({ ...values(form), donor_available: form.elements.donor_available.checked, donor_contact_visible: form.elements.donor_contact_visible.checked }))}>
           <input name="phone" defaultValue={profile.phone} placeholder="Phone" required />
           <select name="hall_id" defaultValue={profile.hall_id || ""}><option value="">Hall</option>{data.academics.halls?.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select>
@@ -239,6 +242,7 @@ function Student({ data, submit, refresh, notify }) {
         <h3>Attendance</h3>
         {data.attendance?.map((item) => <p key={item.classroom_id}><strong>{item.course}</strong><br />{item.percentage}% · {item.present} present · {item.absent} absent</p>)}
       </div>
+      {profile.is_cr && <CRAcademicSetup profile={profile} submit={submit} />}
     </div>
     <div className="panel">
       <h3>CR elections</h3>
@@ -269,6 +273,43 @@ function Student({ data, submit, refresh, notify }) {
       {data.complaints.map((item) => <p key={item.id}><strong>{item.subject}</strong> · {item.status}</p>)}
     </div>
     <DonorSearch batches={data.academics.batches || []} notify={notify} />
+  </div>;
+}
+
+function CRAcademicSetup({ profile, submit }) {
+  const [courseRows, setCourseRows] = useState([0]);
+  function transform(form) {
+    const formData = new FormData(form);
+    const codes = formData.getAll("course_code");
+    const names = formData.getAll("course_name");
+    const credits = formData.getAll("credits");
+    return {
+      batch_name: formData.get("batch_name"),
+      semester_number: Number(formData.get("semester_number")),
+      courses: codes.map((course_code, index) => ({
+        course_code,
+        course_name: names[index],
+        credits: Number(credits[index]),
+      })),
+    };
+  }
+  return <div className="panel cr-academics">
+    <div className="panel-heading"><span><small>CR controls</small><h3>Batch academics</h3></span><span className="count-badge">BSSE</span></div>
+    <p className="helper">Batch {profile.batch} · Session {profile.academic_session}. These values come from your IIT email and cannot be changed.</p>
+    <form onSubmit={(event) => submit(event, "/api/cr/academic-setup", "POST", transform)}>
+      <label>Batch name<input name="batch_name" defaultValue={profile.batch_name} placeholder="Choose your batch name" required /></label>
+      <label>Current semester<input name="semester_number" type="number" min="1" max="20" defaultValue={profile.semester_number || ""} placeholder="Semester number" required /></label>
+      <div className="course-editor">
+        <div className="course-editor-heading"><strong>Semester courses</strong><button className="secondary" type="button" onClick={() => setCourseRows((rows) => [...rows, Math.max(...rows) + 1])}>Add course</button></div>
+        {courseRows.map((row, index) => <div className="course-row" key={row}>
+          <input name="course_code" placeholder="Course code" aria-label={`Course ${index + 1} code`} required />
+          <input name="course_name" placeholder="Course name" aria-label={`Course ${index + 1} name`} required />
+          <input name="credits" type="number" min="0.5" max="10" step="0.5" placeholder="Credits" aria-label={`Course ${index + 1} credits`} required />
+          {courseRows.length > 1 && <button className="remove-row" type="button" aria-label={`Remove course ${index + 1}`} onClick={() => setCourseRows((rows) => rows.filter((item) => item !== row))}>×</button>}
+        </div>)}
+      </div>
+      <button>Save academic plan</button>
+    </form>
   </div>;
 }
 

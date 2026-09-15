@@ -26,16 +26,20 @@ from api.index import (
     ComplaintCreate,
     ComplaintDecision,
     Course,
+    CourseSetup,
     ElectionCreate,
     FeedbackCreate,
     NominationCreate,
     OtpRequest,
     Signup,
     StudentProfileUpdate,
+    StaffDecision,
     TeacherDecision,
     User,
     VoteCreate,
     admin_user,
+    administer_user,
+    administrative_users,
     attendance_summary,
     audit_log,
     close_election,
@@ -74,25 +78,18 @@ class PhaseFlowTest(unittest.TestCase):
                 return user
 
         admin = register("Admin", "admin@iit.du.ac.bd")
-        create_academic_setup(
-            AcademicSetup(
-                program_code="BSSE",
-                program_name="Bachelor of Software Engineering",
-                academic_session="2022-23",
-                batch_code="15",
-                batch_name="15th Batch",
-                semester_number=5,
-                semester_name="5th Semester",
-                course_code="SE-301",
-                course_name="Software Architecture",
-                credits=3,
-                hall_name="Test Hall",
-            ),
-            admin,
-        )
         teacher = register("Teacher", "teacher2@iit.du.ac.bd")
         decide_teacher(teacher.id, TeacherDecision(action="APPROVE"), admin)
         teacher.status = "ACTIVE"
+        self.assertTrue(any(member["email"] == teacher.email for member in administrative_users(admin)))
+        self.assertEqual(
+            administer_user(teacher.id, StaffDecision(action="MAKE_ADMIN"), admin)["role"],
+            "DEPARTMENT_ADMIN",
+        )
+        self.assertEqual(
+            administer_user(teacher.id, StaffDecision(action="MAKE_TEACHER"), admin)["role"],
+            "TEACHER",
+        )
         student_one = register("Student 01", "bsse1501@iit.du.ac.bd")
         student_two = register("Student 02", "bsse1502@iit.du.ac.bd")
 
@@ -110,9 +107,7 @@ class PhaseFlowTest(unittest.TestCase):
         )
         with Session(engine) as db:
             batch = db.scalar(select(Batch).where(Batch.code == "15"))
-            course = db.scalar(select(Course).where(Course.code == "SE-301"))
             batch_id, session_id = batch.id, batch.session_id
-            course_id, semester_id = course.id, course.semester_id
 
         position = create_cr_position(
             CRPositionCreate(batch_id=batch_id, title="General CR", seats=1), admin
@@ -145,6 +140,26 @@ class PhaseFlowTest(unittest.TestCase):
             stored.voting_end = now - timedelta(seconds=1)
             db.commit()
         self.assertEqual(close_election(election["id"], admin)["winners"], [student_one.id])
+
+        academic_result = create_academic_setup(
+            AcademicSetup(
+                batch_name="Code Fifteen",
+                semester_number=5,
+                courses=[
+                    CourseSetup(course_code="SE-301", course_name="Software Architecture", credits=3),
+                    CourseSetup(course_code="SE-302", course_name="Software Testing", credits=2),
+                ],
+            ),
+            student_one,
+        )
+        self.assertEqual(academic_result["session"], "22-23")
+        self.assertEqual(len(academic_result["courses"]), 2)
+        with Session(engine) as db:
+            batch = db.get(Batch, batch_id)
+            course = db.scalar(select(Course).where(Course.code == "SE-301"))
+            self.assertEqual(batch.name, "Code Fifteen")
+            self.assertEqual(batch.current_semester_id, course.semester_id)
+            course_id, semester_id = course.id, course.semester_id
 
         classroom = create_classroom(
             ClassroomCreate(

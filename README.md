@@ -1,6 +1,6 @@
 # IIT Management
 
-IIT departmental management system through Phase 8: authentication, academic data, student profiles, CR elections, classrooms, attendance, complaints, anonymous course feedback, dashboards, donor search, notifications, auditing, and production hardening.
+IIT departmental management system through Phase 8: authentication, CR-managed academic data, staff administration, student profiles, CR elections, classrooms, attendance, complaints, anonymous course feedback, dashboards, donor search, notifications, auditing, and production hardening.
 
 ## Requirements
 
@@ -96,7 +96,7 @@ COOKIE_SECURE=false
 | `SUPER_ADMIN_EMAIL` | Backend | The only email assigned the initial `SUPER_ADMIN` role |
 | `COOKIE_SECURE` | Backend | `false` for local HTTP; `true` for production HTTPS cookies |
 
-The default student policy accepts addresses such as `bsse1501@iit.du.ac.bd`, producing program `BSSE`, batch `15`, and roll `01`. `SUPER_ADMIN_EMAIL` becomes the active super admin after email verification. Other `@iit.du.ac.bd` accounts become pending teachers. All other domains are rejected.
+The default student policy accepts addresses such as `bsse1501@iit.du.ac.bd`, producing program `BSSE`, batch `15`, roll `01`, and academic session `22-23`. The session is derived from the batch number in either direction (`15` ↔ `22-23`); it is never entered manually. `SUPER_ADMIN_EMAIL` becomes the active super admin after email verification. Other `@iit.du.ac.bd` accounts become pending teachers. All other domains are rejected.
 
 Set `SUPER_ADMIN_EMAIL` to your real email before signup. If that address already has a verified account, signing in once upgrades it to `SUPER_ADMIN`.
 
@@ -140,6 +140,8 @@ cd ../frontend && npm run build
 4. Students sign up with the configured address format. Their program, batch, and roll are parsed from the email and matched to the configured batch.
 5. Teachers create classrooms. Matching students are enrolled automatically; teachers then add class sessions, record attendance, and view anonymous feedback aggregates.
 6. Admins create CR positions and elections, then approve candidates and close elections after voting ends. Students nominate themselves and cast one secret ballot per election.
+7. An elected CR chooses the batch display name and current semester, then assigns one or more courses with their course codes, names, and credits. BSSE, batch, and session remain locked to the student email identity.
+8. The super admin can promote or demote department administrators. Administrators can activate or deactivate eligible staff accounts; the super-admin account and the current user's own account are protected.
 7. Students complete profiles, view attendance, submit one anonymous review per enrolled classroom, and submit complaints. Admins move complaints through the required workflow.
 8. Dashboard cards summarize role-specific activity. Students can opt into donor discovery and separately choose whether their phone is visible.
 9. Notifications cover account approval, classrooms, attendance, complaints, nominations, and election results. Admins can inspect the audit log.

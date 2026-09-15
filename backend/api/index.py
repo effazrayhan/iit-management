@@ -115,6 +115,7 @@ class Batch(Base):
     name: Mapped[str] = mapped_column(String(100))
     program_id: Mapped[int] = mapped_column(ForeignKey("programs.id"))
     session_id: Mapped[int] = mapped_column(ForeignKey("academic_sessions.id"))
+    current_semester_id: Mapped[int | None] = mapped_column(ForeignKey("semesters.id"))
     status: Mapped[str] = mapped_column(String(20), default="ACTIVE")
 
 
@@ -342,6 +343,9 @@ if engine.dialect.name == "postgresql":
             "profile_completed BOOLEAN DEFAULT FALSE",
         ):
             connection.execute(text(f"ALTER TABLE student_profiles ADD COLUMN IF NOT EXISTS {column}"))
+        connection.execute(
+            text("ALTER TABLE batches ADD COLUMN IF NOT EXISTS current_semester_id INTEGER REFERENCES semesters(id)")
+        )
 
 app = FastAPI(title="IIT Management API")
 app.add_middleware(
@@ -404,18 +408,20 @@ class TeacherDecision(BaseModel):
     action: Literal["APPROVE", "REJECT", "MAKE_ADMIN"]
 
 
-class AcademicSetup(BaseModel):
-    program_code: str = Field(min_length=1, max_length=20)
-    program_name: str = Field(min_length=1, max_length=255)
-    academic_session: str = Field(min_length=1, max_length=20)
-    batch_code: str = Field(min_length=1, max_length=10)
-    batch_name: str = Field(min_length=1, max_length=100)
-    semester_number: int = Field(ge=1, le=20)
-    semester_name: str = Field(min_length=1, max_length=100)
+class StaffDecision(BaseModel):
+    action: Literal["MAKE_ADMIN", "MAKE_TEACHER", "ACTIVATE", "DEACTIVATE"]
+
+
+class CourseSetup(BaseModel):
     course_code: str = Field(min_length=1, max_length=30)
     course_name: str = Field(min_length=1, max_length=255)
     credits: float = Field(ge=0.5, le=10)
-    hall_name: str | None = Field(default=None, max_length=255)
+
+
+class AcademicSetup(BaseModel):
+    batch_name: str = Field(min_length=1, max_length=100)
+    semester_number: int = Field(ge=1, le=20)
+    courses: list[CourseSetup] = Field(min_length=1, max_length=20)
 
 
 class StudentProfileUpdate(BaseModel):
@@ -517,6 +523,51 @@ def classify_email(email: str) -> tuple[str, str, dict[str, str] | None]:
     if email.endswith(f"@{STAFF_EMAIL_DOMAIN}"):
         return "TEACHER", "PENDING", None
     raise ValueError("Use an IIT email address")
+
+
+def session_from_batch(batch_code: str) -> str:
+    """Map an IIT batch number to its two-year academic session (15 -> 22-23)."""
+    if not re.fullmatch(r"\d{2}", batch_code):
+        raise ValueError("Batch code must contain two digits")
+    start_year = 2007 + int(batch_code)
+    return f"{start_year % 100:02d}-{(start_year + 1) % 100:02d}"
+
+
+def batch_from_session(session: str) -> str:
+    """Reverse the academic session mapping (22-23 or 2022-23 -> 15)."""
+    match = re.fullmatch(r"(?:20)?(?P<start>\d{2})-(?P<end>\d{2})", session.strip())
+    if not match or (int(match.group("start")) + 1) % 100 != int(match.group("end")):
+        raise ValueError("Session must use the format 22-23")
+    return f"{(int(match.group('start')) - 7) % 100:02d}"
+
+
+def ensure_student_batch(db: Session, student: dict[str, str]) -> Batch:
+    program = db.scalar(select(Program).where(Program.code == "BSSE"))
+    if not program:
+        program = Program(code="BSSE", name="BSSE")
+        db.add(program)
+        db.flush()
+    session_name = session_from_batch(student["batch"])
+    academic_session = db.scalar(
+        select(AcademicSession).where(AcademicSession.name == session_name)
+    )
+    if not academic_session:
+        academic_session = AcademicSession(name=session_name)
+        db.add(academic_session)
+        db.flush()
+    batch = db.scalar(
+        select(Batch).where(Batch.program_id == program.id, Batch.code == student["batch"])
+    )
+    if not batch:
+        batch = Batch(
+            code=student["batch"],
+            name=f"Batch {student['batch']}",
+            program_id=program.id,
+            session_id=academic_session.id,
+        )
+        db.add(batch)
+        db.flush()
+    return batch
 
 
 def hash_password(password: str) -> str:
@@ -627,6 +678,22 @@ def student_user(user: User = Depends(current_user)) -> User:
     return user
 
 
+def cr_batch_id(db: Session, user_id: int) -> int | None:
+    return db.scalar(
+        select(CRPosition.batch_id)
+        .join(CRAppointment, CRAppointment.position_id == CRPosition.id)
+        .where(CRAppointment.student_id == user_id, CRAppointment.status == "ACTIVE")
+        .limit(1)
+    )
+
+
+def cr_user(user: User = Depends(student_user)) -> User:
+    with Session(engine) as db:
+        if not cr_batch_id(db, user.id):
+            raise HTTPException(403, "Active CR appointment required")
+    return user
+
+
 def teacher_or_admin(user: User = Depends(current_user)) -> User:
     if user.role not in {"TEACHER", "SUPER_ADMIN", "DEPARTMENT_ADMIN"}:
         raise HTTPException(403, "Teacher or admin access required")
@@ -690,19 +757,14 @@ def signup(body: Signup):
         try:
             db.flush()
             if student:
-                batch = db.scalar(
-                    select(Batch)
-                    .join(Program)
-                    .where(Program.code == student["program"], Batch.code == student["batch"])
-                )
-                db.add(StudentProfile(user_id=user.id, batch_id=batch.id if batch else None, **student))
-                if batch:
-                    for classroom_id in db.scalars(
-                        select(Classroom.id).where(
-                            Classroom.batch_id == batch.id, Classroom.status == "ACTIVE"
-                        )
-                    ):
-                        db.add(ClassroomEnrollment(classroom_id=classroom_id, student_id=user.id))
+                batch = ensure_student_batch(db, student)
+                db.add(StudentProfile(user_id=user.id, batch_id=batch.id, **student))
+                for classroom_id in db.scalars(
+                    select(Classroom.id).where(
+                        Classroom.batch_id == batch.id, Classroom.status == "ACTIVE"
+                    )
+                ):
+                    db.add(ClassroomEnrollment(classroom_id=classroom_id, student_id=user.id))
             otp = prepare_otp(user, email, "VERIFY", datetime.now(timezone.utc))
             send_otp(email, otp, "VERIFY")
             db.commit()
@@ -871,6 +933,8 @@ def decide_teacher(teacher_id: int, body: TeacherDecision, actor: User = Depends
         teacher = db.get(User, teacher_id)
         if not teacher or teacher.role != "TEACHER" or teacher.status != "PENDING":
             raise HTTPException(404, "Pending teacher not found")
+        if body.action == "MAKE_ADMIN" and actor.role != "SUPER_ADMIN":
+            raise HTTPException(403, "Only the super admin can appoint administrators")
         status = "ACTIVE" if body.action != "REJECT" else "REJECTED"
         if body.action == "MAKE_ADMIN":
             teacher.role = "DEPARTMENT_ADMIN"
@@ -881,52 +945,76 @@ def decide_teacher(teacher_id: int, body: TeacherDecision, actor: User = Depends
     return {"status": status}
 
 
-@app.post("/api/admin/academic-setup", status_code=201)
-def create_academic_setup(body: AcademicSetup, actor: User = Depends(admin_user)):
+@app.get("/api/admin/users")
+def administrative_users(_: User = Depends(admin_user)):
     with Session(engine) as db:
-        program = db.scalar(select(Program).where(Program.code == body.program_code.upper()))
-        if not program:
-            program = Program(code=body.program_code.upper(), name=body.program_name.strip())
-            db.add(program)
-            db.flush()
-        academic_session = db.scalar(select(AcademicSession).where(AcademicSession.name == body.academic_session))
-        if not academic_session:
-            academic_session = AcademicSession(name=body.academic_session.strip())
-            db.add(academic_session)
-            db.flush()
-        batch = db.scalar(
-            select(Batch).where(Batch.program_id == program.id, Batch.code == body.batch_code)
+        users = db.scalars(
+            select(User)
+            .where(User.role.in_(["TEACHER", "DEPARTMENT_ADMIN", "SUPER_ADMIN"]))
+            .order_by(User.role, User.name)
         )
+        return [
+            {"id": user.id, "name": user.name, "email": user.email, "role": user.role, "status": user.status}
+            for user in users
+        ]
+
+
+@app.patch("/api/admin/users/{user_id}")
+def administer_user(user_id: int, body: StaffDecision, actor: User = Depends(admin_user)):
+    with Session(engine) as db:
+        target = db.get(User, user_id)
+        if not target or target.role not in {"TEACHER", "DEPARTMENT_ADMIN", "SUPER_ADMIN"}:
+            raise HTTPException(404, "Staff account not found")
+        if target.role == "SUPER_ADMIN" or target.id == actor.id:
+            raise HTTPException(403, "This account cannot be changed here")
+        if target.role == "DEPARTMENT_ADMIN" and actor.role != "SUPER_ADMIN":
+            raise HTTPException(403, "Only the super admin can manage administrators")
+        if body.action in {"MAKE_ADMIN", "MAKE_TEACHER"}:
+            if actor.role != "SUPER_ADMIN":
+                raise HTTPException(403, "Only the super admin can change administrator roles")
+            target.role = "DEPARTMENT_ADMIN" if body.action == "MAKE_ADMIN" else "TEACHER"
+        else:
+            target.status = "ACTIVE" if body.action == "ACTIVATE" else "REJECTED"
+        audit(db, actor.id, body.action, "user", target.id, f"{target.role}:{target.status}")
+        db.commit()
+        return {"id": target.id, "role": target.role, "status": target.status}
+
+
+@app.post("/api/cr/academic-setup", status_code=201)
+def create_academic_setup(body: AcademicSetup, actor: User = Depends(cr_user)):
+    with Session(engine) as db:
+        batch_id = cr_batch_id(db, actor.id)
+        batch = db.get(Batch, batch_id)
         if not batch:
-            batch = Batch(
-                code=body.batch_code.strip(),
-                name=body.batch_name.strip(),
-                program_id=program.id,
-                session_id=academic_session.id,
-            )
-            db.add(batch)
-            db.flush()
+            raise HTTPException(404, "CR batch not found")
+        batch_code = batch.code
+        batch.name = body.batch_name.strip()
         semester = db.scalar(select(Semester).where(Semester.number == body.semester_number))
         if not semester:
-            semester = Semester(number=body.semester_number, name=body.semester_name.strip())
+            semester = Semester(number=body.semester_number, name=str(body.semester_number))
             db.add(semester)
             db.flush()
-        course = db.scalar(select(Course).where(Course.code == body.course_code.upper()))
-        if not course:
-            course = Course(
-                code=body.course_code.upper(),
-                name=body.course_name.strip(),
-                credits=body.credits,
-                semester_id=semester.id,
-            )
-            db.add(course)
-        if body.hall_name and not db.scalar(select(Hall).where(Hall.name == body.hall_name.strip())):
-            db.add(Hall(name=body.hall_name.strip()))
-        db.flush()
+        batch.current_semester_id = semester.id
+        saved_courses = []
+        for item in body.courses:
+            code = item.course_code.strip().upper()
+            course = db.scalar(select(Course).where(Course.code == code))
+            if course:
+                course.name = item.course_name.strip()
+                course.credits = item.credits
+                course.semester_id = semester.id
+            else:
+                course = Course(
+                    code=code,
+                    name=item.course_name.strip(),
+                    credits=item.credits,
+                    semester_id=semester.id,
+                )
+                db.add(course)
+            db.flush()
+            saved_courses.append(course.code)
         students = db.scalars(
-            select(StudentProfile).where(
-                StudentProfile.program == program.code, StudentProfile.batch == batch.code
-            )
+            select(StudentProfile).where(StudentProfile.batch_id == batch.id)
         )
         for student in students:
             student.batch_id = batch.id
@@ -947,12 +1035,24 @@ def create_academic_setup(body: AcademicSetup, actor: User = Depends(admin_user)
                             classroom_id=classroom_id, student_id=student.user_id
                         )
                     )
-        audit(db, actor.id, "UPSERT", "course", course.id, course.code)
+        audit(
+            db,
+            actor.id,
+            "UPDATE_ACADEMICS",
+            "batch",
+            batch.id,
+            f"Semester {semester.number}: {', '.join(saved_courses)}",
+        )
         try:
             db.commit()
         except IntegrityError:
             raise HTTPException(409, "Academic item already exists")
-    return {"message": "Academic data saved"}
+    return {
+        "message": "Batch academics updated",
+        "program": "BSSE",
+        "session": session_from_batch(batch_code),
+        "courses": saved_courses,
+    }
 
 
 @app.get("/api/academics")
@@ -962,10 +1062,17 @@ def academics(_: User = Depends(current_user)):
             "programs": [{"id": x.id, "code": x.code, "name": x.name} for x in db.scalars(select(Program))],
             "sessions": [{"id": x.id, "name": x.name} for x in db.scalars(select(AcademicSession))],
             "batches": [
-                {"id": x.id, "code": x.code, "name": x.name, "program_id": x.program_id, "session_id": x.session_id}
+                {
+                    "id": x.id,
+                    "code": x.code,
+                    "name": x.name,
+                    "program_id": x.program_id,
+                    "session_id": x.session_id,
+                    "current_semester_id": x.current_semester_id,
+                }
                 for x in db.scalars(select(Batch).where(Batch.status == "ACTIVE"))
             ],
-            "semesters": [{"id": x.id, "number": x.number, "name": x.name} for x in db.scalars(select(Semester))],
+            "semesters": [{"id": x.id, "number": x.number} for x in db.scalars(select(Semester))],
             "courses": [
                 {"id": x.id, "code": x.code, "name": x.name, "credits": x.credits, "semester_id": x.semester_id}
                 for x in db.scalars(select(Course))
@@ -974,7 +1081,7 @@ def academics(_: User = Depends(current_user)):
         }
 
 
-def profile_data(profile: StudentProfile) -> dict:
+def profile_data(profile: StudentProfile, academic: dict | None = None) -> dict:
     return {
         "program": profile.program,
         "batch": profile.batch,
@@ -989,13 +1096,26 @@ def profile_data(profile: StudentProfile) -> dict:
         "donor_available": profile.donor_available,
         "donor_contact_visible": profile.donor_contact_visible,
         "profile_completed": profile.profile_completed,
+        **(academic or {}),
     }
 
 
 @app.get("/api/student/profile")
 def read_profile(user: User = Depends(student_user)):
     with Session(engine) as db:
-        return profile_data(get_student(db, user.id))
+        profile = get_student(db, user.id)
+        batch = db.get(Batch, profile.batch_id) if profile.batch_id else None
+        academic_session = db.get(AcademicSession, batch.session_id) if batch else None
+        semester = db.get(Semester, batch.current_semester_id) if batch and batch.current_semester_id else None
+        return profile_data(
+            profile,
+            {
+                "batch_name": batch.name if batch else "",
+                "academic_session": academic_session.name if academic_session else session_from_batch(profile.batch),
+                "semester_number": semester.number if semester else None,
+                "is_cr": bool(cr_batch_id(db, user.id)),
+            },
+        )
 
 
 @app.put("/api/student/profile")

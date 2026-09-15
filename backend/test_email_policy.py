@@ -13,11 +13,13 @@ from api.index import (
     PasswordReset,
     Signin,
     Signup,
+    batch_from_session,
     classify_email,
     forgot_password,
     hash_password,
     otp_hash,
     reset_password,
+    session_from_batch,
     signin,
     signup,
     verify_email,
@@ -45,6 +47,9 @@ class EmailPolicyTest(unittest.TestCase):
         role, status, profile = classify_email("bsse1501@iit.du.ac.bd")
         self.assertEqual((role, status), ("STUDENT", "ACTIVE"))
         self.assertEqual(profile, {"program": "BSSE", "batch": "15", "roll": "01"})
+        self.assertEqual(session_from_batch(profile["batch"]), "22-23")
+        self.assertEqual(batch_from_session("22-23"), "15")
+        self.assertEqual(batch_from_session("2022-23"), "15")
 
     def test_staff_requires_approval(self):
         self.assertEqual(classify_email("teacher@iit.du.ac.bd")[:2], ("TEACHER", "PENDING"))
