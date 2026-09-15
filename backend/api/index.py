@@ -6,12 +6,14 @@ import re
 import secrets
 import smtplib
 import ssl
+import json
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from time import monotonic
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 import jwt
 from dotenv import load_dotenv
@@ -50,6 +52,7 @@ STAFF_EMAIL_DOMAIN = os.getenv("STAFF_EMAIL_DOMAIN", "iit.du.ac.bd")
 SUPER_ADMIN_EMAIL = os.getenv("SUPER_ADMIN_EMAIL", "").strip().lower()
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+APP_TIMEZONE = ZoneInfo(os.getenv("APP_TIMEZONE", "Asia/Dhaka"))
 
 
 class Base(DeclarativeBase):
@@ -242,6 +245,7 @@ class ClassSession(Base):
     starts_at: Mapped[time] = mapped_column(Time)
     ends_at: Mapped[time] = mapped_column(Time)
     topic: Mapped[str] = mapped_column(String(255), default="")
+    status: Mapped[str] = mapped_column(String(20), default="SCHEDULED")
 
 
 class ClassPost(Base):
@@ -255,6 +259,43 @@ class ClassPost(Base):
     content: Mapped[str] = mapped_column(Text, default="")
     resource_url: Mapped[str | None] = mapped_column(String(1000))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class RecurringClass(Base):
+    __tablename__ = "recurring_classes"
+    __table_args__ = (UniqueConstraint("classroom_id", "weekday", "starts_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    classroom_id: Mapped[int] = mapped_column(ForeignKey("classrooms.id"), index=True)
+    weekday: Mapped[int]
+    starts_at: Mapped[time] = mapped_column(Time)
+    ends_at: Mapped[time] = mapped_column(Time)
+    topic: Mapped[str] = mapped_column(String(255), default="")
+    reminder_minutes: Mapped[int] = mapped_column(default=30)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    last_notified_on: Mapped[date | None] = mapped_column(Date)
+
+
+class RecurringClassCancellation(Base):
+    __tablename__ = "recurring_class_cancellations"
+    __table_args__ = (UniqueConstraint("recurring_class_id", "occurrence_date"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    recurring_class_id: Mapped[int] = mapped_column(ForeignKey("recurring_classes.id"), index=True)
+    occurrence_date: Mapped[date] = mapped_column(Date)
+    reason: Mapped[str] = mapped_column(String(500), default="")
+    cancelled_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+
+
+class PushSubscription(Base):
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    endpoint: Mapped[str] = mapped_column(Text, unique=True)
+    p256dh: Mapped[str] = mapped_column(Text)
+    auth: Mapped[str] = mapped_column(Text)
 
 
 class AttendanceRecord(Base):
@@ -358,6 +399,9 @@ if engine.dialect.name == "postgresql":
             connection.execute(text(f"ALTER TABLE student_profiles ADD COLUMN IF NOT EXISTS {column}"))
         connection.execute(
             text("ALTER TABLE batches ADD COLUMN IF NOT EXISTS current_semester_id INTEGER REFERENCES semesters(id)")
+        )
+        connection.execute(
+            text("ALTER TABLE class_sessions ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'SCHEDULED'")
         )
 
 app = FastAPI(title="IIT Management API")
@@ -496,6 +540,28 @@ class ClassPostCreate(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     content: str = Field(default="", max_length=4000)
     resource_url: str | None = Field(default=None, max_length=1000, pattern=r"^https?://.+")
+
+
+class RecurringClassCreate(BaseModel):
+    weekday: int = Field(ge=0, le=6)
+    starts_at: time
+    ends_at: time
+    topic: str = Field(default="", max_length=255)
+    reminder_minutes: int = Field(default=30, ge=5, le=1440)
+
+
+class RecurringOccurrence(BaseModel):
+    occurrence_date: date
+
+
+class RecurringCancellationCreate(RecurringOccurrence):
+    reason: str = Field(default="", max_length=500)
+
+
+class PushSubscriptionCreate(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=4000)
+    p256dh: str = Field(min_length=1, max_length=1000)
+    auth: str = Field(min_length=1, max_length=1000)
 
 
 class AttendanceItem(BaseModel):
@@ -639,6 +705,51 @@ def send_otp(email: str, otp: str, purpose: str) -> None:
         smtp.send_message(message)
 
 
+def send_class_email(email: str, subject: str, content: str) -> None:
+    message = EmailMessage()
+    message["Subject"] = f"IIT Management: {subject}"
+    message["From"] = os.environ.get("SMTP_FROM", os.environ["SMTP_USER"])
+    message["To"] = email
+    message.set_content(content)
+    with smtplib.SMTP_SSL(
+        os.getenv("SMTP_HOST", "smtp.gmail.com"),
+        int(os.getenv("SMTP_PORT", "465")),
+        context=ssl.create_default_context(),
+    ) as smtp:
+        smtp.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
+        smtp.send_message(message)
+
+
+def send_web_push(db: Session, user_id: int, title: str, message: str) -> None:
+    private_key = os.getenv("VAPID_PRIVATE_KEY")
+    subject = os.getenv("VAPID_SUBJECT", f"mailto:{os.getenv('SMTP_FROM', '')}")
+    if not private_key or not subject:
+        return
+    try:
+        from pywebpush import webpush
+    except ImportError:
+        return
+    payload = json.dumps({"title": title, "body": message, "url": FRONTEND_URL})
+    for subscription in db.scalars(
+        select(PushSubscription).where(PushSubscription.user_id == user_id)
+    ):
+        try:
+            webpush(
+                subscription_info={
+                    "endpoint": subscription.endpoint,
+                    "keys": {"p256dh": subscription.p256dh, "auth": subscription.auth},
+                },
+                data=payload,
+                vapid_private_key=private_key,
+                vapid_claims={"sub": subject},
+                ttl=3600,
+                timeout=5,
+            )
+        except Exception:
+            # In-app notifications remain available if a browser endpoint expires.
+            continue
+
+
 def make_token(user: User) -> str:
     return jwt.encode(
         {
@@ -729,6 +840,29 @@ def get_student(db: Session, user_id: int) -> StudentProfile:
 
 def notify(db: Session, user_id: int, title: str, message: str) -> None:
     db.add(Notification(user_id=user_id, title=title, message=message))
+
+
+def deliver_class_update(
+    db: Session, classroom_id: int, title: str, message: str, *, email: bool = False
+) -> int:
+    students = db.execute(
+        select(User.id, User.email)
+        .join(ClassroomEnrollment, ClassroomEnrollment.student_id == User.id)
+        .where(
+            ClassroomEnrollment.classroom_id == classroom_id,
+            ClassroomEnrollment.status == "ACTIVE",
+        )
+    ).all()
+    for student_id, student_email in students:
+        notify(db, student_id, title, message)
+        send_web_push(db, student_id, title, message)
+        if email:
+            try:
+                send_class_email(student_email, title, message)
+            except (KeyError, OSError, smtplib.SMTPException):
+                # Persist in-app and push notifications even if SMTP is unavailable.
+                continue
+    return len(students)
 
 
 def audit(
@@ -1510,6 +1644,138 @@ def create_class_session(
         return {"id": class_session.id}
 
 
+def next_recurring_date(schedule: RecurringClass, db: Session, start: date | None = None) -> date:
+    local_now = datetime.now(APP_TIMEZONE)
+    candidate = start or local_now.date()
+    candidate += timedelta(days=(schedule.weekday - candidate.weekday()) % 7)
+    if not start and candidate == local_now.date() and schedule.starts_at <= local_now.time().replace(tzinfo=None):
+        candidate += timedelta(days=7)
+    while db.scalar(
+        select(RecurringClassCancellation.id).where(
+            RecurringClassCancellation.recurring_class_id == schedule.id,
+            RecurringClassCancellation.occurrence_date == candidate,
+        )
+    ):
+        candidate += timedelta(days=7)
+    return candidate
+
+
+@app.post("/api/classrooms/{classroom_id}/recurring", status_code=201)
+def create_recurring_class(
+    classroom_id: int, body: RecurringClassCreate, user: User = Depends(teacher_or_admin)
+):
+    if body.starts_at >= body.ends_at:
+        raise HTTPException(400, "End time must be after start time")
+    with Session(engine) as db:
+        classroom = db.get(Classroom, classroom_id)
+        if not classroom or not can_manage_classroom(user, classroom):
+            raise HTTPException(403, "Cannot manage this classroom")
+        schedule = RecurringClass(classroom_id=classroom_id, created_by=user.id, **body.model_dump())
+        db.add(schedule)
+        try:
+            db.flush()
+        except IntegrityError:
+            raise HTTPException(409, "This recurring class already exists")
+        course = db.get(Course, classroom.course_id)
+        weekday = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][body.weekday]
+        deliver_class_update(
+            db,
+            classroom_id,
+            "Recurring class scheduled",
+            f"{course.code} meets every {weekday} at {body.starts_at.strftime('%I:%M %p')}.",
+        )
+        audit(db, user.id, "CREATE", "recurring_class", schedule.id, course.code)
+        db.commit()
+        return {"id": schedule.id, "next_date": next_recurring_date(schedule, db)}
+
+
+@app.post("/api/recurring-classes/{schedule_id}/start", status_code=201)
+def start_recurring_class(
+    schedule_id: int, body: RecurringOccurrence, user: User = Depends(teacher_or_admin)
+):
+    with Session(engine) as db:
+        schedule = db.get(RecurringClass, schedule_id)
+        classroom = db.get(Classroom, schedule.classroom_id) if schedule else None
+        if not schedule or not schedule.active or not classroom or not can_manage_classroom(user, classroom):
+            raise HTTPException(403, "Cannot manage this recurring class")
+        if body.occurrence_date.weekday() != schedule.weekday:
+            raise HTTPException(400, "Date does not match the recurring weekday")
+        cancelled = db.scalar(
+            select(RecurringClassCancellation.id).where(
+                RecurringClassCancellation.recurring_class_id == schedule.id,
+                RecurringClassCancellation.occurrence_date == body.occurrence_date,
+            )
+        )
+        if cancelled:
+            raise HTTPException(400, "This class occurrence is cancelled")
+        class_session = db.scalar(
+            select(ClassSession).where(
+                ClassSession.classroom_id == classroom.id,
+                ClassSession.session_date == body.occurrence_date,
+                ClassSession.starts_at == schedule.starts_at,
+            )
+        )
+        if not class_session:
+            class_session = ClassSession(
+                classroom_id=classroom.id,
+                session_date=body.occurrence_date,
+                starts_at=schedule.starts_at,
+                ends_at=schedule.ends_at,
+                topic=schedule.topic,
+            )
+            db.add(class_session)
+            db.commit()
+            db.refresh(class_session)
+        return {"id": class_session.id}
+
+
+@app.post("/api/recurring-classes/{schedule_id}/cancel", status_code=201)
+def cancel_recurring_class(
+    schedule_id: int,
+    body: RecurringCancellationCreate,
+    user: User = Depends(teacher_or_admin),
+):
+    with Session(engine) as db:
+        schedule = db.get(RecurringClass, schedule_id)
+        classroom = db.get(Classroom, schedule.classroom_id) if schedule else None
+        if not schedule or not classroom or not can_manage_classroom(user, classroom):
+            raise HTTPException(403, "Cannot manage this recurring class")
+        if body.occurrence_date.weekday() != schedule.weekday:
+            raise HTTPException(400, "Date does not match the recurring weekday")
+        cancellation = RecurringClassCancellation(
+            recurring_class_id=schedule.id,
+            occurrence_date=body.occurrence_date,
+            reason=body.reason.strip(),
+            cancelled_by=user.id,
+        )
+        db.add(cancellation)
+        try:
+            db.flush()
+        except IntegrityError:
+            raise HTTPException(409, "This occurrence is already cancelled")
+        existing_session = db.scalar(
+            select(ClassSession).where(
+                ClassSession.classroom_id == classroom.id,
+                ClassSession.session_date == body.occurrence_date,
+                ClassSession.starts_at == schedule.starts_at,
+            )
+        )
+        if existing_session:
+            existing_session.status = "CANCELLED"
+        course = db.get(Course, classroom.course_id)
+        reason = f" Reason: {body.reason.strip()}" if body.reason.strip() else ""
+        recipient_count = deliver_class_update(
+            db,
+            classroom.id,
+            "Class cancelled",
+            f"{course.code} on {body.occurrence_date.isoformat()} has been cancelled.{reason}",
+            email=True,
+        )
+        audit(db, user.id, "CANCEL", "recurring_class", schedule.id, body.occurrence_date.isoformat())
+        db.commit()
+        return {"cancelled": True, "notified": recipient_count}
+
+
 @app.get("/api/classrooms/{classroom_id}/sessions")
 def classroom_sessions(classroom_id: int, user: User = Depends(current_user)):
     with Session(engine) as db:
@@ -1535,11 +1801,29 @@ def classroom_sessions(classroom_id: int, user: User = Depends(current_user)):
                     "starts_at": class_session.starts_at,
                     "ends_at": class_session.ends_at,
                     "topic": class_session.topic,
+                    "status": class_session.status,
                     "attendance": [
                         {"student_id": record.student_id, "name": record_user.name, "email": record_user.email, "status": record.status}
                         for record, record_user in records
                         if can_manage_classroom(user, classroom) or record.student_id == user.id
                     ],
+                }
+            )
+        recurring = []
+        for schedule in db.scalars(
+            select(RecurringClass)
+            .where(RecurringClass.classroom_id == classroom_id, RecurringClass.active.is_(True))
+            .order_by(RecurringClass.weekday, RecurringClass.starts_at)
+        ):
+            recurring.append(
+                {
+                    "id": schedule.id,
+                    "weekday": schedule.weekday,
+                    "starts_at": schedule.starts_at,
+                    "ends_at": schedule.ends_at,
+                    "topic": schedule.topic,
+                    "reminder_minutes": schedule.reminder_minutes,
+                    "next_date": next_recurring_date(schedule, db),
                 }
             )
         if can_manage_classroom(user, classroom):
@@ -1549,8 +1833,8 @@ def classroom_sessions(classroom_id: int, user: User = Depends(current_user)):
                 .where(ClassroomEnrollment.classroom_id == classroom_id)
                 .order_by(User.email)
             ).all()
-            return {"sessions": sessions, "roster": [dict(row._mapping) for row in roster]}
-        return {"sessions": sessions}
+            return {"sessions": sessions, "recurring": recurring, "roster": [dict(row._mapping) for row in roster]}
+        return {"sessions": sessions, "recurring": recurring}
 
 
 @app.put("/api/sessions/{class_session_id}/attendance")
@@ -1562,6 +1846,8 @@ def save_attendance(
         classroom = db.get(Classroom, class_session.classroom_id) if class_session else None
         if not classroom or not can_manage_classroom(user, classroom):
             raise HTTPException(403, "Cannot manage this classroom")
+        if class_session.status == "CANCELLED":
+            raise HTTPException(400, "Attendance cannot be taken for a cancelled class")
         for item in body.records:
             enrolled = db.scalar(
                 select(ClassroomEnrollment.id).where(
@@ -1810,6 +2096,61 @@ def notifications(user: User = Depends(current_user)):
             }
             for item in items
         ]
+
+
+@app.post("/api/push/subscribe", status_code=201)
+def subscribe_push(body: PushSubscriptionCreate, user: User = Depends(current_user)):
+    with Session(engine) as db:
+        subscription = db.scalar(
+            select(PushSubscription).where(PushSubscription.endpoint == body.endpoint)
+        )
+        if subscription:
+            subscription.user_id = user.id
+            subscription.p256dh = body.p256dh
+            subscription.auth = body.auth
+        else:
+            db.add(PushSubscription(user_id=user.id, **body.model_dump()))
+        db.commit()
+    return {"subscribed": True}
+
+
+@app.get("/api/jobs/class-reminders")
+def class_reminders(authorization: str | None = Header(default=None)):
+    secret = os.getenv("CRON_SECRET")
+    if not secret or authorization != f"Bearer {secret}":
+        raise HTTPException(401, "Invalid cron authorization")
+    now = datetime.now(APP_TIMEZONE)
+    sent = 0
+    with Session(engine) as db:
+        schedules = db.scalars(
+            select(RecurringClass).where(
+                RecurringClass.active.is_(True), RecurringClass.weekday == now.weekday()
+            )
+        )
+        for schedule in schedules:
+            starts = datetime.combine(now.date(), schedule.starts_at, APP_TIMEZONE)
+            minutes_until = (starts - now).total_seconds() / 60
+            if not 0 <= minutes_until <= schedule.reminder_minutes or schedule.last_notified_on == now.date():
+                continue
+            cancelled = db.scalar(
+                select(RecurringClassCancellation.id).where(
+                    RecurringClassCancellation.recurring_class_id == schedule.id,
+                    RecurringClassCancellation.occurrence_date == now.date(),
+                )
+            )
+            if cancelled:
+                continue
+            classroom = db.get(Classroom, schedule.classroom_id)
+            course = db.get(Course, classroom.course_id)
+            sent += deliver_class_update(
+                db,
+                classroom.id,
+                "Class starts soon",
+                f"{course.code} starts at {schedule.starts_at.strftime('%I:%M %p')}. {schedule.topic}",
+            )
+            schedule.last_notified_on = now.date()
+        db.commit()
+    return {"notifications": sent, "checked_at": now}
 
 
 @app.patch("/api/notifications/{notification_id}/read")

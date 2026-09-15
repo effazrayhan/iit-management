@@ -32,6 +32,9 @@ from api.index import (
     FeedbackCreate,
     NominationCreate,
     OtpRequest,
+    RecurringCancellationCreate,
+    RecurringClassCreate,
+    RecurringOccurrence,
     Signup,
     StudentProfileUpdate,
     StaffDecision,
@@ -44,6 +47,7 @@ from api.index import (
     attendance_summary,
     audit_log,
     close_election,
+    cancel_recurring_class,
     classroom_posts,
     create_academic_setup,
     create_class_session,
@@ -52,6 +56,7 @@ from api.index import (
     create_complaint,
     create_cr_position,
     create_election,
+    create_recurring_class,
     decide_candidate,
     decide_teacher,
     dashboard,
@@ -61,6 +66,7 @@ from api.index import (
     notifications,
     save_attendance,
     signup,
+    start_recurring_class,
     submit_feedback,
     update_complaint,
     update_profile,
@@ -186,6 +192,37 @@ class PhaseFlowTest(unittest.TestCase):
         posts = classroom_posts(classroom["id"], student_one)
         self.assertEqual(posts[0]["title"], "Architecture notes")
         self.assertEqual(posts[0]["kind"], "RESOURCE")
+        with patch("api.index.send_class_email"), patch("api.index.send_web_push"):
+            recurring = create_recurring_class(
+                classroom["id"],
+                RecurringClassCreate(
+                    weekday=date.today().weekday(),
+                    starts_at=time(9),
+                    ends_at=time(10),
+                    topic="Weekly architecture class",
+                    reminder_minutes=30,
+                ),
+                teacher,
+            )
+            recurring_session = start_recurring_class(
+                recurring["id"], RecurringOccurrence(occurrence_date=recurring["next_date"]), teacher
+            )
+            self.assertTrue(recurring_session["id"])
+            cancellation = cancel_recurring_class(
+                recurring["id"],
+                RecurringCancellationCreate(
+                    occurrence_date=recurring["next_date"],
+                    reason="Department event",
+                ),
+                teacher,
+            )
+            self.assertEqual(cancellation["notified"], 2)
+            with self.assertRaises(HTTPException):
+                save_attendance(
+                    recurring_session["id"],
+                    AttendanceUpdate(records=[AttendanceItem(student_id=student_one.id, status="PRESENT")]),
+                    teacher,
+                )
         class_session = create_class_session(
             classroom["id"],
             ClassSessionCreate(

@@ -20,7 +20,7 @@ function values(form) {
   return Object.fromEntries([...new FormData(form)].filter(([, value]) => value !== ""));
 }
 
-export default function Dashboard({ user, notify }) {
+export default function Dashboard({ user, page, notify }) {
   const [data, setData] = useState({ academics: {}, classrooms: [], elections: [], complaints: [], positions: [] });
   const admin = ["SUPER_ADMIN", "DEPARTMENT_ADMIN"].includes(user.role);
 
@@ -58,16 +58,20 @@ export default function Dashboard({ user, notify }) {
     }
   }
 
-  const screen = admin
-    ? <Admin user={user} data={data} submit={submit} refresh={refresh} notify={notify} />
-    : user.role === "TEACHER"
-      ? <Teacher data={data} submit={submit} notify={notify} />
-      : <Student data={data} submit={submit} refresh={refresh} notify={notify} />;
-  return <>
-    <div id="overview" className="metrics">{Object.entries(data.metrics || {}).map(([key, value]) => <div key={key}><span className="metric-icon" aria-hidden="true">{key.includes("student") ? "◉" : key.includes("teacher") ? "◇" : key.includes("complaint") ? "!" : "↗"}</span><strong>{value}</strong><small>{key.replaceAll("_", " ")}</small></div>)}</div>
-    {data.notifications?.length > 0 && <div id="notifications" className="panel notices"><div className="panel-heading"><span><small>Updates</small><h3>Notifications</h3></span><span className="count-badge">{data.notifications.length}</span></div>{data.notifications.map((item) => <button className={item.read ? "read" : ""} key={item.id} onClick={async () => { await request(`/api/notifications/${item.id}/read`, { method: "PATCH" }); await refresh(); }}><span className="notice-dot" /><span><strong>{item.title}</strong><small>{item.message}</small></span></button>)}</div>}
-    <div id="workspace">{screen}</div>
-  </>;
+  const notificationList = <Notifications items={data.notifications || []} refresh={refresh} />;
+  if (page === "notifications") return <div className="page-view">{notificationList}</div>;
+  if (page === "overview") return <div className="page-view">
+    <div className="overview-heading"><span><p className="eyebrow">Dashboard</p><h2>Welcome back, {user.name.split(" ")[0]}</h2></span><p>A quick look at your IIT workspace.</p></div>
+    <div className="metrics">{Object.entries(data.metrics || {}).map(([key, value]) => <div key={key}><span className="metric-icon" aria-hidden="true">{key.includes("student") ? "◉" : key.includes("teacher") ? "◇" : key.includes("complaint") ? "!" : "↗"}</span><strong>{value}</strong><small>{key.replaceAll("_", " ")}</small></div>)}</div>
+    {(data.notifications || []).length > 0 && <div className="overview-notifications">{<Notifications items={data.notifications.slice(0, 4)} refresh={refresh} />}</div>}
+  </div>;
+  if (admin) return <div className="page-view"><Admin user={user} data={data} submit={submit} refresh={refresh} notify={notify} /></div>;
+  if (user.role === "TEACHER") return <div className="page-view"><Teacher data={data} submit={submit} notify={notify} /></div>;
+  return <div className="page-view"><Student page={page} data={data} submit={submit} refresh={refresh} notify={notify} /></div>;
+}
+
+function Notifications({ items, refresh }) {
+  return <div className="panel notices"><div className="panel-heading"><span><small>Updates</small><h3>Notifications</h3></span><span className="count-badge">{items.length}</span></div>{items.length ? items.map((item) => <button className={item.read ? "read" : ""} key={item.id} onClick={async () => { await request(`/api/notifications/${item.id}/read`, { method: "PATCH" }); await refresh(); }}><span className="notice-dot" /><span><strong>{item.title}</strong><small>{item.message}</small></span></button>) : <div className="empty-state"><strong>You're all caught up</strong><p>New class and campus updates will appear here.</p></div>}</div>;
 }
 
 function Admin({ user, data, submit, refresh, notify }) {
@@ -171,7 +175,7 @@ function Teacher({ data, submit, notify }) {
 }
 
 function TeacherClassroom({ classroom, notify }) {
-  const [details, setDetails] = useState({ sessions: [], roster: [] });
+  const [details, setDetails] = useState({ sessions: [], recurring: [], roster: [] });
   const [posts, setPosts] = useState([]);
   const [postKind, setPostKind] = useState("ANNOUNCEMENT");
   const [feedback, setFeedback] = useState(null);
@@ -214,6 +218,14 @@ function TeacherClassroom({ classroom, notify }) {
     } catch (error) { notify(error.message); }
   }
 
+  async function recurringAction(path, occurrence_date, reason = "") {
+    try {
+      await request(path, { method: "POST", body: JSON.stringify({ occurrence_date, reason }) });
+      notify(path.endsWith("cancel") ? "Class cancelled and students notified." : "Class opened for attendance.");
+      await load();
+    } catch (error) { notify(error.message); }
+  }
+
   return <div className="panel class-workspace">
     <div className="class-header"><span className="class-code">{classroom.course_code}</span><span><h3>{classroom.course_name}</h3><small>{classroom.batch_name} · Section {classroom.section} · {details.roster.length} students</small></span></div>
     <h4>Schedule a class</h4>
@@ -224,6 +236,26 @@ function TeacherClassroom({ classroom, notify }) {
       <input name="topic" placeholder="Topic" />
       <button>Add class</button>
     </form>
+    <h4>Recurring schedule</h4>
+    <form className="recurring-form" onSubmit={async (event) => {
+      event.preventDefault();
+      try {
+        await request(`/api/classrooms/${classroom.id}/recurring`, { method: "POST", body: JSON.stringify({ ...values(event.currentTarget), weekday: Number(event.currentTarget.elements.weekday.value), reminder_minutes: Number(event.currentTarget.elements.reminder_minutes.value) }) });
+        event.currentTarget.reset(); notify("Recurring class scheduled."); await load();
+      } catch (error) { notify(error.message); }
+    }}>
+      <select name="weekday" aria-label="Weekday" required>{["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day, index) => <option value={index} key={day}>{day}</option>)}</select>
+      <input name="starts_at" type="time" aria-label="Start time" required />
+      <input name="ends_at" type="time" aria-label="End time" required />
+      <input name="topic" placeholder="Topic" />
+      <select name="reminder_minutes" aria-label="Reminder"><option value="15">15 min reminder</option><option value="30">30 min reminder</option><option value="60">1 hour reminder</option></select>
+      <button>Repeat weekly</button>
+    </form>
+    <div className="recurring-list">{details.recurring.map((schedule) => <article key={schedule.id}>
+      <span><strong>{weekdayName(schedule.weekday)} · {formatTime(schedule.starts_at)}–{formatTime(schedule.ends_at)}</strong><small>Next: {formatDate(schedule.next_date)} · Reminder {schedule.reminder_minutes} min before</small></span>
+      <button onClick={() => recurringAction(`/api/recurring-classes/${schedule.id}/start`, schedule.next_date)}>Take attendance</button>
+      <button className="reject" onClick={() => recurringAction(`/api/recurring-classes/${schedule.id}/cancel`, schedule.next_date, "Cancelled by teacher")}>Cancel class</button>
+    </article>)}</div>
     <h4>Publish to class</h4>
     <form className="post-composer" onSubmit={publish}>
       <select name="kind" value={postKind} onChange={(event) => setPostKind(event.target.value)}><option value="ANNOUNCEMENT">Announcement</option><option value="RESOURCE">Resource</option></select>
@@ -234,7 +266,7 @@ function TeacherClassroom({ classroom, notify }) {
     </form>
     <ClassFeed posts={posts} />
     <h4>Attendance sessions</h4>
-    {details.sessions.map((session) => <form className="attendance" key={session.id} onSubmit={(event) => attendance(event, session.id)}>
+    {details.sessions.map((session) => session.status === "CANCELLED" ? <div className="cancelled-session" key={session.id}><strong>{formatDate(session.date)} · {session.topic || "Class session"}</strong><span>Cancelled</span></div> : <form className="attendance" key={session.id} onSubmit={(event) => attendance(event, session.id)}>
       <strong>{formatDate(session.date)} · {formatTime(session.starts_at)}–{formatTime(session.ends_at)} · {session.topic || "Class session"}</strong>
       {details.roster.map((student) => <label key={student.id}>{student.name}<select name={student.id} defaultValue={session.attendance.find((x) => x.student_id === student.id)?.status || "PRESENT"}>{["PRESENT", "ABSENT", "LATE", "EXCUSED"].map((x) => <option key={x}>{x}</option>)}</select></label>)}
       <button>Save attendance</button>
@@ -244,17 +276,34 @@ function TeacherClassroom({ classroom, notify }) {
   </div>;
 }
 
-function Student({ data, submit, refresh, notify }) {
+function Student({ page, data, submit, refresh, notify }) {
   const profile = data.profile || {};
   async function electionAction(path, body = {}) {
     try { await request(path, { method: "POST", body: JSON.stringify(body) }); await refresh(); }
     catch (error) { notify(error.message); }
   }
 
+  const classes = <>
+    <section className="hub-section">
+      <div className="section-heading"><span><small>Learning</small><h2>My classes</h2></span><span className="count-badge">{data.classrooms.length}</span></div>
+      <div className="class-grid">{data.classrooms.length ? data.classrooms.map((classroom) => <StudentClassroom key={classroom.id} classroom={classroom} notify={notify} />) : <div className="panel empty-state"><strong>No classes yet</strong><p>Your enrolled classes will appear here after a teacher creates them.</p></div>}</div>
+    </section>
+    <div className="panel">
+      <h3>Course feedback</h3>
+      {data.classrooms.map((classroom) => <form className="feedback" key={classroom.id} onSubmit={(event) => submit(event, `/api/classrooms/${classroom.id}/feedback`)}>
+        <strong>{classroom.course_code} — {classroom.course_name}</strong>
+        {[["clarity", "Clarity"], ["organization", "Organization"], ["fairness", "Fairness"], ["regularity", "Regularity"], ["interaction", "Interaction"]].map(([name, label]) => <label key={name}>{label}<input name={name} type="number" min="1" max="5" defaultValue="5" required /></label>)}
+        <textarea name="comment" placeholder="Suggestion (optional)" />
+        <button>Submit anonymously</button>
+      </form>)}
+    </div>
+  </>;
+  if (page === "classes") return <div className="workspace classes-page">{classes}</div>;
+
   return <div className="workspace student-hub">
     <div className="hub-hero">
       <div><p className="eyebrow">Student hub</p><h2>{profile.batch_name || `Batch ${profile.batch}`}</h2><p>BSSE · Session {profile.academic_session} · {profile.semester_number ? `Semester ${profile.semester_number}` : "Semester pending"}</p></div>
-      <div className="hub-actions"><button onClick={() => document.getElementById("classes")?.scrollIntoView({ behavior: "smooth" })}>My classes</button><button className="secondary" onClick={() => document.getElementById("complaints")?.scrollIntoView({ behavior: "smooth" })}>Get support</button></div>
+      <div className="hub-actions"><span>{data.classrooms.length} active classes</span><span>{data.notifications?.filter((item) => !item.read).length || 0} unread updates</span></div>
     </div>
     <div className="grid">
       <div className="panel">
@@ -278,11 +327,7 @@ function Student({ data, submit, refresh, notify }) {
       </div>
       {profile.is_cr && <CRAcademicSetup profile={profile} submit={submit} />}
     </div>
-    <section id="classes" className="hub-section">
-      <div className="section-heading"><span><small>Learning</small><h2>My classes</h2></span><span className="count-badge">{data.classrooms.length}</span></div>
-      <div className="class-grid">{data.classrooms.length ? data.classrooms.map((classroom) => <StudentClassroom key={classroom.id} classroom={classroom} notify={notify} />) : <div className="panel empty-state"><strong>No classes yet</strong><p>Your enrolled classes will appear here after a teacher creates them.</p></div>}</div>
-    </section>
-    <div id="elections" className="panel">
+    <div className="panel">
       <h3>CR elections</h3>
       {data.elections.map((election) => <div className="election" key={election.id}>
         <strong>{election.title}</strong><small>{election.position}</small>
@@ -290,16 +335,7 @@ function Student({ data, submit, refresh, notify }) {
         {election.candidates.filter((x) => x.status === "APPROVED").map((candidate) => <button key={candidate.id} disabled={election.has_voted} onClick={() => electionAction(`/api/elections/${election.id}/vote`, { candidate_id: candidate.id })}>Vote for {candidate.name}</button>)}
       </div>)}
     </div>
-    <div id="feedback" className="panel">
-      <h3>Course feedback</h3>
-      {data.classrooms.map((classroom) => <form className="feedback" key={classroom.id} onSubmit={(event) => submit(event, `/api/classrooms/${classroom.id}/feedback`)}>
-        <strong>{classroom.course_code} — {classroom.course_name}</strong>
-        {[["clarity", "Clarity"], ["organization", "Organization"], ["fairness", "Fairness"], ["regularity", "Regularity"], ["interaction", "Interaction"]].map(([name, label]) => <label key={name}>{label}<input name={name} type="number" min="1" max="5" defaultValue="5" required /></label>)}
-        <textarea name="comment" placeholder="Suggestion (optional)" />
-        <button>Submit anonymously</button>
-      </form>)}
-    </div>
-    <div id="complaints" className="panel">
+    <div className="panel">
       <h3>Complaints</h3>
       <form onSubmit={(event) => submit(event, "/api/complaints", "POST", (form) => ({ ...values(form), confidential: form.elements.confidential.checked }))}>
         <select name="category" required>{["ACADEMIC", "CLASSROOM", "LAB", "FACILITIES", "TEACHER", "ADMINISTRATION", "HARASSMENT_SAFETY", "OTHER"].map((x) => <option key={x}>{x}</option>)}</select>
@@ -310,12 +346,12 @@ function Student({ data, submit, refresh, notify }) {
       </form>
       {data.complaints.map((item) => <p key={item.id}><strong>{item.subject}</strong> · {item.status}</p>)}
     </div>
-    <div id="donors"><DonorSearch batches={data.academics.batches || []} notify={notify} /></div>
+    <DonorSearch batches={data.academics.batches || []} notify={notify} />
   </div>;
 }
 
 function StudentClassroom({ classroom, notify }) {
-  const [details, setDetails] = useState({ sessions: [] });
+  const [details, setDetails] = useState({ sessions: [], recurring: [] });
   const [posts, setPosts] = useState([]);
   useEffect(() => {
     Promise.all([
@@ -327,11 +363,12 @@ function StudentClassroom({ classroom, notify }) {
     }).catch((error) => notify(error.message));
   }, [classroom.id]);
   const nextSession = [...details.sessions]
-    .filter((session) => new Date(`${session.date}T${session.ends_at}`) >= new Date())
+    .filter((session) => session.status !== "CANCELLED" && new Date(`${session.date}T${session.ends_at}`) >= new Date())
     .sort((a, b) => `${a.date}${a.starts_at}`.localeCompare(`${b.date}${b.starts_at}`))[0];
   return <article className="student-class-card">
     <div className="class-header"><span className="class-code">{classroom.course_code}</span><span><h3>{classroom.course_name}</h3><small>{classroom.teacher_name} · Section {classroom.section}</small></span></div>
     <div className="next-class">{nextSession ? <><small>Next class</small><strong>{formatDate(nextSession.date)} at {formatTime(nextSession.starts_at)}</strong><span>{nextSession.topic || "Class session"}</span></> : <><small>Schedule</small><strong>No upcoming class</strong><span>Check back for updates.</span></>}</div>
+    {details.recurring?.map((schedule) => <div className="recurring-chip" key={schedule.id}><strong>Every {weekdayName(schedule.weekday)}</strong><span>{formatTime(schedule.starts_at)}–{formatTime(schedule.ends_at)} · next {formatDate(schedule.next_date)}</span></div>)}
     <ClassFeed posts={posts.slice(0, 3)} compact />
   </article>;
 }
@@ -355,6 +392,10 @@ function formatTime(value) {
   if (!value) return "";
   const [hours, minutes] = value.split(":");
   return new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit" }).format(new Date(2000, 0, 1, Number(hours), Number(minutes)));
+}
+
+function weekdayName(value) {
+  return ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][value];
 }
 
 function CRAcademicSetup({ profile, submit }) {

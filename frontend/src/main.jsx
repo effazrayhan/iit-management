@@ -12,7 +12,22 @@ function App() {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
+  const [activePage, setActivePage] = useState("overview");
+  const [theme, setTheme] = useState(() => localStorage.getItem("theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
+  const [fullscreen, setFullscreen] = useState(false);
   const searchRef = useRef(null);
+  const windowRef = useRef(null);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    const changed = () => setFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener("fullscreenchange", changed);
+    return () => document.removeEventListener("fullscreenchange", changed);
+  }, []);
 
   useEffect(() => {
     localStorage.removeItem("token");
@@ -38,7 +53,7 @@ function App() {
 
   useEffect(() => {
     if (!user) return;
-    const panels = document.querySelectorAll(".dashboard-content .panel");
+    const panels = document.querySelectorAll(".dashboard-content .panel, .dashboard-content .student-class-card");
     panels.forEach((panel) => {
       const matches = !query || panel.textContent.toLowerCase().includes(query.toLowerCase());
       panel.classList.toggle("search-hidden", !matches);
@@ -123,33 +138,61 @@ function App() {
   async function logout() {
     await fetch(`${API}/api/auth/logout`, { method: "POST", credentials: "include" });
     setUser(null);
+    setActivePage("overview");
   }
 
-  function jumpTo(id) {
-    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  function navigate(id) {
+    setActivePage(id);
+    setQuery("");
+  }
+
+  async function toggleFullscreen() {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await windowRef.current?.requestFullscreen();
+    } catch { setMessage("Fullscreen is not available in this browser."); }
+  }
+
+  async function enablePush() {
+    const publicKey = import.meta.env.VITE_VAPID_PUBLIC_KEY;
+    if (!publicKey) return setMessage("Push notifications need a VAPID public key in the deployment settings.");
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) return setMessage("Push notifications are not supported by this browser.");
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") return setMessage("Notification permission was not granted.");
+      const registration = await navigator.serviceWorker.register("/sw.js");
+      const padding = "=".repeat((4 - publicKey.length % 4) % 4);
+      const bytes = Uint8Array.from(atob((publicKey + padding).replace(/-/g, "+").replace(/_/g, "/")), (char) => char.charCodeAt(0));
+      const subscription = await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: bytes });
+      const json = subscription.toJSON();
+      const response = await fetch(`${API}/api/push/subscribe`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint: json.endpoint, p256dh: json.keys.p256dh, auth: json.keys.auth }) });
+      if (!response.ok) throw new Error();
+      setMessage("Push notifications enabled.");
+    } catch { setMessage("Could not enable push notifications."); }
   }
 
   const initials = user?.name?.split(" ").map((part) => part[0]).slice(0, 2).join("").toUpperCase();
   const navigation = user?.role === "STUDENT"
-    ? [["overview", "Overview", "grid"], ["workspace", "Student hub", "folder"], ["classes", "Classes", "book"], ["notifications", "Notifications", "bell"]]
-    : [["overview", "Overview", "grid"], ["workspace", user?.role === "TEACHER" ? "Classes" : "Administration", "folder"], ["notifications", "Notifications", "bell"]];
+    ? [["overview", "Overview", "grid"], ["student-hub", "Student hub", "folder"], ["classes", "Classes", "book"], ["notifications", "Notifications", "bell"]]
+    : [["overview", "Overview", "grid"], [user?.role === "TEACHER" ? "classes" : "administration", user?.role === "TEACHER" ? "Classes" : "Administration", "folder"], ["notifications", "Notifications", "bell"]];
+  const pageTitle = navigation.find(([id]) => id === activePage)?.[1] || "Overview";
 
   return (
     <main className="app-stage">
-      <section className={`mac-window ${user ? "dashboard-window" : "auth-window"}`}>
+      <section ref={windowRef} className={`mac-window ${user ? "dashboard-window" : "auth-window"}`}>
         <header className="titlebar">
           <div className="traffic-lights" aria-label="Window controls">
-            <span className="traffic-close" /><span className="traffic-minimize" /><span className="traffic-expand" />
+            <span className="traffic-close" /><span className="traffic-minimize" /><button className="traffic-expand" onClick={toggleFullscreen} aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"} title={fullscreen ? "Exit fullscreen" : "Enter fullscreen"} />
           </div>
           <div className="window-title"><Icon name="campus" /> IIT Management</div>
-          <div className="titlebar-spacer" />
+          <div className="titlebar-actions">{!user && <button className="icon-button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label="Toggle dark mode" title="Toggle dark mode"><Icon name={theme === "dark" ? "sun" : "moon"} /></button>}</div>
         </header>
         {user ? (
           <div className="app-layout">
             <aside className="sidebar">
               <div className="brand"><span className="brand-mark"><Icon name="campus" /></span><span><strong>IIT Management</strong><small>University of Dhaka</small></span></div>
               <nav aria-label="Main navigation">
-                {navigation.map(([id, label, icon], index) => <button className={index === 0 ? "nav-item selected" : "nav-item"} key={id} onClick={() => jumpTo(id)}><Icon name={icon} />{label}</button>)}
+                {navigation.map(([id, label, icon]) => <button className={activePage === id ? "nav-item selected" : "nav-item"} key={id} onClick={() => navigate(id)}><Icon name={icon} />{label}</button>)}
               </nav>
               <div className="sidebar-profile">
                 <span className="avatar">{initials}</span>
@@ -159,13 +202,13 @@ function App() {
             </aside>
             <div className="content-column">
               <div className="toolbar">
-                <div><p className="toolbar-kicker">{new Intl.DateTimeFormat("en", { weekday: "long", month: "long", day: "numeric" }).format(new Date())}</p><h1>Welcome back, {user.name.split(" ")[0]}</h1></div>
-                <label className="search-field"><Icon name="search" /><input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search dashboard" aria-label="Search dashboard" /><kbd>⌘ K</kbd></label>
+                <div><p className="toolbar-kicker">{new Intl.DateTimeFormat("en", { weekday: "long", month: "long", day: "numeric" }).format(new Date())}</p><h1>{pageTitle}</h1></div>
+                <div className="toolbar-actions"><label className="search-field"><Icon name="search" /><input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${pageTitle.toLowerCase()}`} aria-label="Search current page" /><kbd>⌘ K</kbd></label><button className="icon-button toolbar-button" onClick={enablePush} aria-label="Enable push notifications" title="Enable push notifications"><Icon name="bell" /></button><button className="icon-button toolbar-button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label="Toggle dark mode" title="Toggle dark mode"><Icon name={theme === "dark" ? "sun" : "moon"} /></button><button className="icon-button toolbar-button" onClick={toggleFullscreen} aria-label="Toggle fullscreen" title="Toggle fullscreen"><Icon name="fullscreen" /></button></div>
               </div>
-              <div className="dashboard-content"><Dashboard user={user} notify={setMessage} /></div>
+              <div className="dashboard-content"><Dashboard user={user} page={activePage} notify={setMessage} /></div>
             </div>
             <nav className="mobile-dock" aria-label="Mobile navigation">
-              {navigation.map(([id, label, icon]) => <button key={id} onClick={() => jumpTo(id)}><Icon name={icon} /><span>{label}</span></button>)}
+              {navigation.map(([id, label, icon]) => <button className={activePage === id ? "selected" : ""} key={id} onClick={() => navigate(id)}><Icon name={icon} /><span>{label}</span></button>)}
             </nav>
           </div>
         ) : (
@@ -205,6 +248,9 @@ function Icon({ name }) {
     logout: <><path d="M10 5H5v14h5M14 8l4 4-4 4m4-4H9"/></>,
     search: <><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></>,
     info: <><circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/></>,
+    moon: <path d="M20 15.5A8 8 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5z"/>,
+    sun: <><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M19 5l-1.5 1.5m-11 11L5 19"/></>,
+    fullscreen: <><path d="M8 3H3v5m13-5h5v5M8 21H3v-5m13 5h5v-5"/></>,
   };
   return <svg className="icon" viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
 }

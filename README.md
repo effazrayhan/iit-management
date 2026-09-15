@@ -80,6 +80,11 @@ STUDENT_EMAIL_PATTERN=^bsse(?P<batch>\d{2})(?P<roll>\d{2})@iit\.du\.ac\.bd$
 STAFF_EMAIL_DOMAIN=iit.du.ac.bd
 SUPER_ADMIN_EMAIL=admin@iit.du.ac.bd
 COOKIE_SECURE=false
+APP_TIMEZONE=Asia/Dhaka
+CRON_SECRET=replace-with-a-random-value-at-least-16-characters
+VAPID_SUBJECT=mailto:your-address@gmail.com
+VAPID_PRIVATE_KEY=replace-with-your-vapid-private-key
+VITE_VAPID_PUBLIC_KEY=replace-with-your-vapid-public-key
 ```
 
 | Variable | Used by | Purpose |
@@ -95,10 +100,24 @@ COOKIE_SECURE=false
 | `STAFF_EMAIL_DOMAIN` | Backend | Permitted staff domain |
 | `SUPER_ADMIN_EMAIL` | Backend | The only email assigned the initial `SUPER_ADMIN` role |
 | `COOKIE_SECURE` | Backend | `false` for local HTTP; `true` for production HTTPS cookies |
+| `APP_TIMEZONE` | Backend | Timezone used to evaluate recurring class schedules |
+| `CRON_SECRET` | Backend | Protects the recurring reminder endpoint |
+| `VAPID_SUBJECT` / `VAPID_PRIVATE_KEY` | Backend | Signs browser push messages |
+| `VITE_VAPID_PUBLIC_KEY` | Frontend | Creates browser push subscriptions |
 
 The default student policy accepts addresses such as `bsse1501@iit.du.ac.bd`, producing program `BSSE`, batch `15`, roll `01`, and academic session `22-23`. The session is derived from the batch number in either direction (`15` ↔ `22-23`); it is never entered manually. `SUPER_ADMIN_EMAIL` becomes the active super admin after email verification. Other `@iit.du.ac.bd` accounts become pending teachers. All other domains are rejected.
 
 Set `SUPER_ADMIN_EMAIL` to your real email before signup. If that address already has a verified account, signing in once upgrades it to `SUPER_ADMIN`.
+
+Generate the Web Push key pair once and keep the private key secret:
+
+```bash
+cd backend
+.venv/bin/vapid --gen
+.venv/bin/vapid --applicationServerKey
+```
+
+Use the generated private key file (or its PEM content) for `VAPID_PRIVATE_KEY` and the `applicationServerKey` output for `VITE_VAPID_PUBLIC_KEY`. Never regenerate these keys while active browser subscriptions exist.
 
 ## 5. Run locally
 
@@ -139,10 +158,10 @@ cd ../frontend && npm run build
 3. Teachers sign up and verify their email. The super admin approves them or promotes them to department admin.
 4. Admins create CR positions and elections, then approve candidates and close elections after voting ends. Students nominate themselves and cast one secret ballot per election.
 5. An elected CR chooses the batch display name and current semester, then assigns one or more courses with their course codes, names, and credits.
-6. Teachers create classrooms. Matching students are enrolled automatically. Each class workspace supports scheduled sessions, attendance, announcements, resource links, and anonymous feedback aggregates.
-7. Students use **Student Hub → Classes** to see teachers, upcoming sessions, announcements, resources, and course feedback. The hub also provides profile, attendance, elections, complaints, and blood-donor discovery.
+6. Teachers create classrooms. Matching students are enrolled automatically. Each class workspace supports one-off or weekly recurring sessions, reminder timing, per-occurrence cancellation, attendance, announcements, resource links, and anonymous feedback aggregates.
+7. Students use **Student Hub → Classes** to see teachers, upcoming and recurring sessions, announcements, resources, and course feedback. The hub also provides profile, attendance, elections, complaints, and blood-donor discovery.
 8. The super admin can promote or demote department administrators. Administrators can activate or deactivate eligible staff accounts; the super-admin account and the current user's own account are protected.
-9. Notifications cover account approval, class posts, classrooms, attendance, complaints, nominations, and election results. Admins can inspect the audit log.
+9. Notifications cover account approval, class posts, recurring reminders and cancellations, classrooms, attendance, complaints, nominations, and election results. Cancellations are sent by email, in-app notification, and Web Push when enabled. Admins can inspect the audit log.
 
 Interactive endpoint documentation is available at `/docs` on the backend. Authentication uses a seven-day HttpOnly cookie; passwords and tokens are never stored in browser storage.
 
@@ -169,6 +188,10 @@ STUDENT_EMAIL_PATTERN
 STAFF_EMAIL_DOMAIN
 SUPER_ADMIN_EMAIL
 COOKIE_SECURE
+APP_TIMEZONE
+CRON_SECRET
+VAPID_SUBJECT
+VAPID_PRIVATE_KEY
 ```
 
 4. Initially set `FRONTEND_URL` to `http://localhost:5173` and deploy.
@@ -182,6 +205,7 @@ COOKIE_SECURE
 
 ```env
 VITE_API_URL=https://iit-management-api.vercel.app
+VITE_VAPID_PUBLIC_KEY=your-vapid-public-key
 ```
 
 4. Deploy and copy the frontend URL.
