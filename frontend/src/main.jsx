@@ -146,6 +146,10 @@ function App() {
     setQuery("");
   }
 
+  function updateUser(patch) {
+    setUser((current) => ({ ...current, ...patch }));
+  }
+
   async function toggleFullscreen() {
     try {
       if (document.fullscreenElement) await document.exitFullscreen();
@@ -173,7 +177,7 @@ function App() {
 
   const initials = user?.name?.split(" ").map((part) => part[0]).slice(0, 2).join("").toUpperCase();
   const navigation = user?.role === "STUDENT"
-    ? [["overview", "Overview", "grid"], ["student-hub", "Student hub", "folder"], ["classes", "Classes", "book"], ["notifications", "Notifications", "bell"]]
+    ? [["overview", "Overview", "grid"], ["student-hub", "Student hub", "folder"], ["classes", "Classes", "book"], ["others", "Others", "more"], ["notifications", "Notifications", "bell"]]
     : [["overview", "Overview", "grid"], [user?.role === "TEACHER" ? "classes" : "administration", user?.role === "TEACHER" ? "Classes" : "Administration", "folder"], ["notifications", "Notifications", "bell"]];
   const pageTitle = navigation.find(([id]) => id === activePage)?.[1] || "Overview";
 
@@ -181,9 +185,7 @@ function App() {
     <main className="app-stage">
       <section ref={windowRef} className={`mac-window ${user ? "dashboard-window" : "auth-window"}`}>
         <header className="titlebar">
-          <div className="traffic-lights" aria-label="Window controls">
-            <span className="traffic-close" /><span className="traffic-minimize" /><button className="traffic-expand" onClick={toggleFullscreen} aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"} title={fullscreen ? "Exit fullscreen" : "Enter fullscreen"} />
-          </div>
+          <div />
           <div className="window-title"><Icon name="campus" /> IIT Management</div>
           <div className="titlebar-actions">{!user && <button className="icon-button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label="Toggle dark mode" title="Toggle dark mode"><Icon name={theme === "dark" ? "sun" : "moon"} /></button>}</div>
         </header>
@@ -195,7 +197,7 @@ function App() {
                 {navigation.map(([id, label, icon]) => <button className={activePage === id ? "nav-item selected" : "nav-item"} key={id} onClick={() => navigate(id)}><Icon name={icon} />{label}</button>)}
               </nav>
               <div className="sidebar-profile">
-                <span className="avatar">{initials}</span>
+                <span className="avatar">{user.profile_picture ? <img src={user.profile_picture} alt="" /> : initials}</span>
                 <span><strong>{user.name}</strong><small>{user.role.replaceAll("_", " ").toLowerCase()}</small></span>
                 <button className="icon-button" onClick={logout} aria-label="Sign out" title="Sign out"><Icon name="logout" /></button>
               </div>
@@ -205,7 +207,7 @@ function App() {
                 <div><p className="toolbar-kicker">{new Intl.DateTimeFormat("en", { weekday: "long", month: "long", day: "numeric" }).format(new Date())}</p><h1>{pageTitle}</h1></div>
                 <div className="toolbar-actions"><label className="search-field"><Icon name="search" /><input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${pageTitle.toLowerCase()}`} aria-label="Search current page" /><kbd>⌘ K</kbd></label><button className="icon-button toolbar-button" onClick={enablePush} aria-label="Enable push notifications" title="Enable push notifications"><Icon name="bell" /></button><button className="icon-button toolbar-button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label="Toggle dark mode" title="Toggle dark mode"><Icon name={theme === "dark" ? "sun" : "moon"} /></button><button className="icon-button toolbar-button" onClick={toggleFullscreen} aria-label="Toggle fullscreen" title="Toggle fullscreen"><Icon name="fullscreen" /></button></div>
               </div>
-              <div className="dashboard-content"><Dashboard user={user} page={activePage} notify={setMessage} /></div>
+              <div className="dashboard-content"><Dashboard user={user} page={activePage} notify={setMessage} onUserUpdate={updateUser} /></div>
             </div>
             <nav className="mobile-dock" aria-label="Mobile navigation">
               {navigation.map(([id, label, icon]) => <button className={activePage === id ? "selected" : ""} key={id} onClick={() => navigate(id)}><Icon name={icon} /><span>{label}</span></button>)}
@@ -244,6 +246,7 @@ function Icon({ name }) {
     grid: <><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></>,
     folder: <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/>,
     book: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v17H6.5A2.5 2.5 0 0 0 4 22z"/><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v17h4.5A2.5 2.5 0 0 1 20 22z"/></>,
+    more: <><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></>,
     bell: <><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7"/><path d="M10 20h4"/></>,
     logout: <><path d="M10 5H5v14h5M14 8l4 4-4 4m4-4H9"/></>,
     search: <><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></>,

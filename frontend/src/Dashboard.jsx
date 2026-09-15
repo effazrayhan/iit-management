@@ -20,7 +20,7 @@ function values(form) {
   return Object.fromEntries([...new FormData(form)].filter(([, value]) => value !== ""));
 }
 
-export default function Dashboard({ user, page, notify }) {
+export default function Dashboard({ user, page, notify, onUserUpdate }) {
   const [data, setData] = useState({ academics: {}, classrooms: [], elections: [], complaints: [], positions: [] });
   const admin = ["SUPER_ADMIN", "DEPARTMENT_ADMIN"].includes(user.role);
 
@@ -65,16 +65,50 @@ export default function Dashboard({ user, page, notify }) {
     <div className="metrics">{Object.entries(data.metrics || {}).map(([key, value]) => <div key={key}><span className="metric-icon" aria-hidden="true">{key.includes("student") ? "◉" : key.includes("teacher") ? "◇" : key.includes("complaint") ? "!" : "↗"}</span><strong>{value}</strong><small>{key.replaceAll("_", " ")}</small></div>)}</div>
     {(data.notifications || []).length > 0 && <div className="overview-notifications">{<Notifications items={data.notifications.slice(0, 4)} refresh={refresh} />}</div>}
   </div>;
-  if (admin) return <div className="page-view"><Admin user={user} data={data} submit={submit} refresh={refresh} notify={notify} /></div>;
-  if (user.role === "TEACHER") return <div className="page-view"><Teacher data={data} submit={submit} notify={notify} /></div>;
-  return <div className="page-view"><Student page={page} data={data} submit={submit} refresh={refresh} notify={notify} /></div>;
+  if (admin) return <div className="page-view"><Admin user={user} data={data} submit={submit} refresh={refresh} notify={notify} onUserUpdate={onUserUpdate} /></div>;
+  if (user.role === "TEACHER") return <div className="page-view"><Teacher user={user} data={data} submit={submit} notify={notify} onUserUpdate={onUserUpdate} /></div>;
+  return <div className="page-view"><Student user={user} page={page} data={data} submit={submit} refresh={refresh} notify={notify} onUserUpdate={onUserUpdate} /></div>;
 }
 
 function Notifications({ items, refresh }) {
   return <div className="panel notices"><div className="panel-heading"><span><small>Updates</small><h3>Notifications</h3></span><span className="count-badge">{items.length}</span></div>{items.length ? items.map((item) => <button className={item.read ? "read" : ""} key={item.id} onClick={async () => { await request(`/api/notifications/${item.id}/read`, { method: "PATCH" }); await refresh(); }}><span className="notice-dot" /><span><strong>{item.title}</strong><small>{item.message}</small></span></button>) : <div className="empty-state"><strong>You're all caught up</strong><p>New class and campus updates will appear here.</p></div>}</div>;
 }
 
-function Admin({ user, data, submit, refresh, notify }) {
+function ProfilePicture({ user, notify, onUserUpdate }) {
+  const [preview, setPreview] = useState(user.profile_picture || "");
+  const initials = (user.name || user.email || "U").split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
+  async function select(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (file.size > 1500000) { notify("Choose an image under 1.5 MB."); return; }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const result = await request("/api/profile-picture", { method: "PUT", body: JSON.stringify({ image: reader.result }) });
+        setPreview(result.profile_picture || ""); onUserUpdate?.({ profile_picture: result.profile_picture || "" }); notify("Profile picture updated.");
+      } catch (error) { notify(error.message); }
+    };
+    reader.readAsDataURL(file);
+  }
+  async function remove() {
+    try { await request("/api/profile-picture", { method: "PUT", body: JSON.stringify({ image: null }) }); setPreview(""); onUserUpdate?.({ profile_picture: "" }); notify("Profile picture removed."); }
+    catch (error) { notify(error.message); }
+  }
+  return <div className="panel profile-picture-panel"><div className="profile-picture-preview">{preview ? <img src={preview} alt="Profile" /> : <span>{initials}</span>}</div><div><strong>Profile picture</strong><small>Shown to your classmates and teachers</small><div className="profile-picture-copy"><label className="button secondary">Choose image<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={select} /></label>{preview && <button className="secondary" type="button" onClick={remove}>Remove</button>}</div></div></div>;
+}
+
+function AttendancePicker({ name, label, defaultValue = "PRESENT" }) {
+  const [value, setValue] = useState(defaultValue);
+  const statuses = ["PRESENT", "ABSENT", "LATE", "EXCUSED"];
+  return <div className="attendance-picker-row"><span>{label}</span><input type="hidden" name={name} value={value} /><div className="attendance-buttons">{statuses.map((status) => <button type="button" key={status} className={value === status ? "selected" : ""} onClick={() => setValue(status)}>{status[0] + status.slice(1).toLowerCase()}</button>)}</div></div>;
+}
+
+function StarRating({ name, label, defaultValue = 5 }) {
+  const [value, setValue] = useState(defaultValue);
+  return <label className="star-rating"><span>{label}</span><span className="stars" aria-label={`${label}: ${value} out of 5`}>{[1, 2, 3, 4, 5].map((star) => <button type="button" key={star} className={star <= value ? "selected" : ""} aria-label={`${star} stars`} onClick={() => setValue(star)}>★</button>)}</span><input type="hidden" name={name} value={value} /></label>;
+}
+
+function Admin({ user, data, submit, refresh, notify, onUserUpdate }) {
   const nextStatus = { SUBMITTED: "ACKNOWLEDGED", ACKNOWLEDGED: "UNDER_REVIEW", UNDER_REVIEW: "ASSIGNED", ASSIGNED: "ACTION_TAKEN", ACTION_TAKEN: "RESOLVED" };
   async function action(path, body) {
     try {
@@ -83,7 +117,7 @@ function Admin({ user, data, submit, refresh, notify }) {
     } catch (error) { notify(error.message); }
   }
 
-  return <div className="workspace">
+  return <div className="workspace"><ProfilePicture user={user} notify={notify} onUserUpdate={onUserUpdate} />
     <div className="grid">
       <div className="panel">
         <h3>Academic administration</h3>
@@ -157,8 +191,8 @@ function Admin({ user, data, submit, refresh, notify }) {
   </div>;
 }
 
-function Teacher({ data, submit, notify }) {
-  return <div className="workspace">
+function Teacher({ user, data, submit, notify, onUserUpdate }) {
+  return <div className="workspace"><ProfilePicture user={user} notify={notify} onUserUpdate={onUserUpdate} />
     <div className="panel">
       <h3>Create classroom</h3>
       <form className="row-form" onSubmit={(event) => submit(event, "/api/classrooms")}>
@@ -268,7 +302,7 @@ function TeacherClassroom({ classroom, notify }) {
     <h4>Attendance sessions</h4>
     {details.sessions.map((session) => session.status === "CANCELLED" ? <div className="cancelled-session" key={session.id}><strong>{formatDate(session.date)} · {session.topic || "Class session"}</strong><span>Cancelled</span></div> : <form className="attendance" key={session.id} onSubmit={(event) => attendance(event, session.id)}>
       <strong>{formatDate(session.date)} · {formatTime(session.starts_at)}–{formatTime(session.ends_at)} · {session.topic || "Class session"}</strong>
-      {details.roster.map((student) => <label key={student.id}>{student.name}<select name={student.id} defaultValue={session.attendance.find((x) => x.student_id === student.id)?.status || "PRESENT"}>{["PRESENT", "ABSENT", "LATE", "EXCUSED"].map((x) => <option key={x}>{x}</option>)}</select></label>)}
+      {details.roster.map((student) => <AttendancePicker key={student.id} name={student.id} label={student.name} defaultValue={session.attendance.find((x) => x.student_id === student.id)?.status || "PRESENT"} />)}
       <button>Save attendance</button>
     </form>)}
     <button className="secondary" onClick={async () => { try { setFeedback(await request(`/api/classrooms/${classroom.id}/feedback`)); } catch (error) { notify(error.message); } }}>View feedback</button>
@@ -276,7 +310,7 @@ function TeacherClassroom({ classroom, notify }) {
   </div>;
 }
 
-function Student({ page, data, submit, refresh, notify }) {
+function Student({ user, page, data, submit, refresh, notify, onUserUpdate }) {
   const profile = data.profile || {};
   async function electionAction(path, body = {}) {
     try { await request(path, { method: "POST", body: JSON.stringify(body) }); await refresh(); }
@@ -292,15 +326,17 @@ function Student({ page, data, submit, refresh, notify }) {
       <h3>Course feedback</h3>
       {data.classrooms.map((classroom) => <form className="feedback" key={classroom.id} onSubmit={(event) => submit(event, `/api/classrooms/${classroom.id}/feedback`)}>
         <strong>{classroom.course_code} — {classroom.course_name}</strong>
-        {[["clarity", "Clarity"], ["organization", "Organization"], ["fairness", "Fairness"], ["regularity", "Regularity"], ["interaction", "Interaction"]].map(([name, label]) => <label key={name}>{label}<input name={name} type="number" min="1" max="5" defaultValue="5" required /></label>)}
+        {[["clarity", "Clarity"], ["organization", "Organization"], ["fairness", "Fairness"], ["regularity", "Regularity"], ["interaction", "Interaction"]].map(([name, label]) => <StarRating key={name} name={name} label={label} />)}
         <textarea name="comment" placeholder="Suggestion (optional)" />
         <button>Submit anonymously</button>
       </form>)}
     </div>
   </>;
-  if (page === "classes") return <div className="workspace classes-page">{classes}</div>;
+  if (page === "classes") return <div className="workspace classes-page"><ProfilePicture user={user} notify={notify} onUserUpdate={onUserUpdate} />{classes}</div>;
+  if (page === "others") return <StudentOthers data={data} submit={submit} refresh={refresh} notify={notify} />;
 
   return <div className="workspace student-hub">
+    <ProfilePicture user={user} notify={notify} onUserUpdate={onUserUpdate} />
     <div className="hub-hero">
       <div><p className="eyebrow">Student hub</p><h2>{profile.batch_name || `Batch ${profile.batch}`}</h2><p>BSSE · Session {profile.academic_session} · {profile.semester_number ? `Semester ${profile.semester_number}` : "Semester pending"}</p></div>
       <div className="hub-actions"><span>{data.classrooms.length} active classes</span><span>{data.notifications?.filter((item) => !item.read).length || 0} unread updates</span></div>
@@ -327,25 +363,28 @@ function Student({ page, data, submit, refresh, notify }) {
       </div>
       {profile.is_cr && <CRAcademicSetup profile={profile} submit={submit} />}
     </div>
-    <div className="panel">
-      <h3>CR elections</h3>
-      {data.elections.map((election) => <div className="election" key={election.id}>
-        <strong>{election.title}</strong><small>{election.position}</small>
-        <button className="secondary" onClick={() => electionAction(`/api/elections/${election.id}/nominate`, { manifesto: "" })}>Nominate myself</button>
-        {election.candidates.filter((x) => x.status === "APPROVED").map((candidate) => <button key={candidate.id} disabled={election.has_voted} onClick={() => electionAction(`/api/elections/${election.id}/vote`, { candidate_id: candidate.id })}>Vote for {candidate.name}</button>)}
-      </div>)}
-    </div>
-    <div className="panel">
-      <h3>Complaints</h3>
+  </div>;
+}
+
+function StudentOthers({ data, submit, refresh, notify }) {
+  async function electionAction(path, body = {}) {
+    try { await request(path, { method: "POST", body: JSON.stringify(body) }); await refresh(); }
+    catch (error) { notify(error.message); }
+  }
+  return <div className="workspace others-page">
+    <div className="page-intro"><p className="eyebrow">More campus tools</p><h2>Others</h2><p>Support, elections, and community resources for your batch.</p></div>
+    <div className="panel"><h3>CR elections</h3>{data.elections.length ? data.elections.map((election) => <div className="election" key={election.id}>
+      <strong>{election.title}</strong><small>{election.position} · {election.status}</small>
+      <button className="secondary" onClick={() => electionAction(`/api/elections/${election.id}/nominate`, { manifesto: "" })}>Nominate myself</button>
+      {election.candidates.filter((x) => x.status === "APPROVED").map((candidate) => <button key={candidate.id} disabled={election.has_voted} onClick={() => electionAction(`/api/elections/${election.id}/vote`, { candidate_id: candidate.id })}>Vote for {candidate.name}</button>)}
+    </div>) : <div className="empty-state"><strong>No elections right now</strong><p>Your batch elections will appear here.</p></div>}</div>
+    <div className="panel"><h3>Complaints and support</h3>
       <form onSubmit={(event) => submit(event, "/api/complaints", "POST", (form) => ({ ...values(form), confidential: form.elements.confidential.checked }))}>
         <select name="category" required>{["ACADEMIC", "CLASSROOM", "LAB", "FACILITIES", "TEACHER", "ADMINISTRATION", "HARASSMENT_SAFETY", "OTHER"].map((x) => <option key={x}>{x}</option>)}</select>
-        <input name="subject" placeholder="Subject" required />
-        <textarea name="details" placeholder="Describe the issue" minLength="10" required />
-        <label className="check"><input name="confidential" type="checkbox" defaultChecked /> Confidential</label>
-        <button>Submit complaint</button>
+        <input name="subject" placeholder="Subject" required /><textarea name="details" placeholder="Describe the issue" minLength="10" required />
+        <label className="check"><input name="confidential" type="checkbox" defaultChecked /> Confidential</label><button>Submit complaint</button>
       </form>
-      {data.complaints.map((item) => <p key={item.id}><strong>{item.subject}</strong> · {item.status}</p>)}
-    </div>
+      {data.complaints.map((item) => <p key={item.id}><strong>{item.subject}</strong> · {item.status}</p>)}</div>
     <DonorSearch batches={data.academics.batches || []} notify={notify} />
   </div>;
 }

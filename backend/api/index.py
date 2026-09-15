@@ -68,6 +68,7 @@ class User(Base):
     password_hash: Mapped[str | None] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(32))
+    profile_picture: Mapped[str | None] = mapped_column(Text)
     otp_digest: Mapped[str | None] = mapped_column(String(64))
     otp_purpose: Mapped[str | None] = mapped_column(String(16))
     otp_expires: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -382,6 +383,7 @@ if engine.dialect.name == "postgresql":
             "otp_expires TIMESTAMPTZ",
             "otp_sent_at TIMESTAMPTZ",
             "otp_attempts INTEGER",
+            "profile_picture TEXT",
         ):
             connection.execute(text(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {column}"))
         for column in (
@@ -562,6 +564,10 @@ class PushSubscriptionCreate(BaseModel):
     endpoint: str = Field(min_length=1, max_length=4000)
     p256dh: str = Field(min_length=1, max_length=1000)
     auth: str = Field(min_length=1, max_length=1000)
+
+
+class ProfilePictureUpdate(BaseModel):
+    image: str | None = Field(default=None, max_length=2_000_000)
 
 
 class AttendanceItem(BaseModel):
@@ -1061,7 +1067,18 @@ def reset_password(body: PasswordReset):
 
 @app.get("/api/me")
 def me(user: User = Depends(current_user)):
-    return {"email": user.email, "name": user.name, "role": user.role}
+    return {"email": user.email, "name": user.name, "role": user.role, "profile_picture": user.profile_picture}
+
+
+@app.put("/api/profile-picture")
+def update_profile_picture(body: ProfilePictureUpdate, user: User = Depends(current_user)):
+    if body.image and not re.fullmatch(r"data:image/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=_-]+", body.image):
+        raise HTTPException(400, "Upload a PNG, JPEG, WEBP, or GIF image")
+    with Session(engine) as db:
+        account = db.get(User, user.id)
+        account.profile_picture = body.image
+        db.commit()
+        return {"profile_picture": account.profile_picture}
 
 
 @app.post("/api/auth/logout")
