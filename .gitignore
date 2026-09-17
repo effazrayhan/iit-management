@@ -5,3 +5,5 @@ __pycache__/
 *.py[cod]
 .venv/
 .vercel/
+/backend/private_key.pem
+/backend/public_key.pem

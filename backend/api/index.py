@@ -6,12 +6,14 @@ import re
 import secrets
 import smtplib
 import ssl
+import json
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from time import monotonic
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 import jwt
 from dotenv import load_dotenv
@@ -50,6 +52,7 @@ STAFF_EMAIL_DOMAIN = os.getenv("STAFF_EMAIL_DOMAIN", "iit.du.ac.bd")
 SUPER_ADMIN_EMAIL = os.getenv("SUPER_ADMIN_EMAIL", "").strip().lower()
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+APP_TIMEZONE = ZoneInfo(os.getenv("APP_TIMEZONE", "Asia/Dhaka"))
 
 
 class Base(DeclarativeBase):
@@ -65,6 +68,7 @@ class User(Base):
     password_hash: Mapped[str | None] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(32))
+    profile_picture: Mapped[str | None] = mapped_column(Text)
     otp_digest: Mapped[str | None] = mapped_column(String(64))
     otp_purpose: Mapped[str | None] = mapped_column(String(16))
     otp_expires: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -115,6 +119,7 @@ class Batch(Base):
     name: Mapped[str] = mapped_column(String(100))
     program_id: Mapped[int] = mapped_column(ForeignKey("programs.id"))
     session_id: Mapped[int] = mapped_column(ForeignKey("academic_sessions.id"))
+    current_semester_id: Mapped[int | None] = mapped_column(ForeignKey("semesters.id"))
     status: Mapped[str] = mapped_column(String(20), default="ACTIVE")
 
 
@@ -241,6 +246,57 @@ class ClassSession(Base):
     starts_at: Mapped[time] = mapped_column(Time)
     ends_at: Mapped[time] = mapped_column(Time)
     topic: Mapped[str] = mapped_column(String(255), default="")
+    status: Mapped[str] = mapped_column(String(20), default="SCHEDULED")
+
+
+class ClassPost(Base):
+    __tablename__ = "class_posts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    classroom_id: Mapped[int] = mapped_column(ForeignKey("classrooms.id"), index=True)
+    author_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    kind: Mapped[str] = mapped_column(String(20))
+    title: Mapped[str] = mapped_column(String(255))
+    content: Mapped[str] = mapped_column(Text, default="")
+    resource_url: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class RecurringClass(Base):
+    __tablename__ = "recurring_classes"
+    __table_args__ = (UniqueConstraint("classroom_id", "weekday", "starts_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    classroom_id: Mapped[int] = mapped_column(ForeignKey("classrooms.id"), index=True)
+    weekday: Mapped[int]
+    starts_at: Mapped[time] = mapped_column(Time)
+    ends_at: Mapped[time] = mapped_column(Time)
+    topic: Mapped[str] = mapped_column(String(255), default="")
+    reminder_minutes: Mapped[int] = mapped_column(default=30)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    last_notified_on: Mapped[date | None] = mapped_column(Date)
+
+
+class RecurringClassCancellation(Base):
+    __tablename__ = "recurring_class_cancellations"
+    __table_args__ = (UniqueConstraint("recurring_class_id", "occurrence_date"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    recurring_class_id: Mapped[int] = mapped_column(ForeignKey("recurring_classes.id"), index=True)
+    occurrence_date: Mapped[date] = mapped_column(Date)
+    reason: Mapped[str] = mapped_column(String(500), default="")
+    cancelled_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+
+
+class PushSubscription(Base):
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    endpoint: Mapped[str] = mapped_column(Text, unique=True)
+    p256dh: Mapped[str] = mapped_column(Text)
+    auth: Mapped[str] = mapped_column(Text)
 
 
 class AttendanceRecord(Base):
@@ -327,6 +383,7 @@ if engine.dialect.name == "postgresql":
             "otp_expires TIMESTAMPTZ",
             "otp_sent_at TIMESTAMPTZ",
             "otp_attempts INTEGER",
+            "profile_picture TEXT",
         ):
             connection.execute(text(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {column}"))
         for column in (
@@ -342,6 +399,12 @@ if engine.dialect.name == "postgresql":
             "profile_completed BOOLEAN DEFAULT FALSE",
         ):
             connection.execute(text(f"ALTER TABLE student_profiles ADD COLUMN IF NOT EXISTS {column}"))
+        connection.execute(
+            text("ALTER TABLE batches ADD COLUMN IF NOT EXISTS current_semester_id INTEGER REFERENCES semesters(id)")
+        )
+        connection.execute(
+            text("ALTER TABLE class_sessions ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'SCHEDULED'")
+        )
 
 app = FastAPI(title="IIT Management API")
 app.add_middleware(
@@ -404,18 +467,20 @@ class TeacherDecision(BaseModel):
     action: Literal["APPROVE", "REJECT", "MAKE_ADMIN"]
 
 
-class AcademicSetup(BaseModel):
-    program_code: str = Field(min_length=1, max_length=20)
-    program_name: str = Field(min_length=1, max_length=255)
-    academic_session: str = Field(min_length=1, max_length=20)
-    batch_code: str = Field(min_length=1, max_length=10)
-    batch_name: str = Field(min_length=1, max_length=100)
-    semester_number: int = Field(ge=1, le=20)
-    semester_name: str = Field(min_length=1, max_length=100)
+class StaffDecision(BaseModel):
+    action: Literal["MAKE_ADMIN", "MAKE_TEACHER", "ACTIVATE", "DEACTIVATE"]
+
+
+class CourseSetup(BaseModel):
     course_code: str = Field(min_length=1, max_length=30)
     course_name: str = Field(min_length=1, max_length=255)
     credits: float = Field(ge=0.5, le=10)
-    hall_name: str | None = Field(default=None, max_length=255)
+
+
+class AcademicSetup(BaseModel):
+    batch_name: str = Field(min_length=1, max_length=100)
+    semester_number: int = Field(ge=1, le=20)
+    courses: list[CourseSetup] = Field(min_length=1, max_length=20)
 
 
 class StudentProfileUpdate(BaseModel):
@@ -472,6 +537,39 @@ class ClassSessionCreate(BaseModel):
     topic: str = Field(default="", max_length=255)
 
 
+class ClassPostCreate(BaseModel):
+    kind: Literal["ANNOUNCEMENT", "RESOURCE"]
+    title: str = Field(min_length=1, max_length=255)
+    content: str = Field(default="", max_length=4000)
+    resource_url: str | None = Field(default=None, max_length=1000, pattern=r"^https?://.+")
+
+
+class RecurringClassCreate(BaseModel):
+    weekday: int = Field(ge=0, le=6)
+    starts_at: time
+    ends_at: time
+    topic: str = Field(default="", max_length=255)
+    reminder_minutes: int = Field(default=30, ge=5, le=1440)
+
+
+class RecurringOccurrence(BaseModel):
+    occurrence_date: date
+
+
+class RecurringCancellationCreate(RecurringOccurrence):
+    reason: str = Field(default="", max_length=500)
+
+
+class PushSubscriptionCreate(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=4000)
+    p256dh: str = Field(min_length=1, max_length=1000)
+    auth: str = Field(min_length=1, max_length=1000)
+
+
+class ProfilePictureUpdate(BaseModel):
+    image: str | None = Field(default=None, max_length=2_000_000)
+
+
 class AttendanceItem(BaseModel):
     student_id: int
     status: Literal["PRESENT", "ABSENT", "LATE", "EXCUSED"]
@@ -517,6 +615,51 @@ def classify_email(email: str) -> tuple[str, str, dict[str, str] | None]:
     if email.endswith(f"@{STAFF_EMAIL_DOMAIN}"):
         return "TEACHER", "PENDING", None
     raise ValueError("Use an IIT email address")
+
+
+def session_from_batch(batch_code: str) -> str:
+    """Map an IIT batch number to its two-year academic session (15 -> 22-23)."""
+    if not re.fullmatch(r"\d{2}", batch_code):
+        raise ValueError("Batch code must contain two digits")
+    start_year = 2007 + int(batch_code)
+    return f"{start_year % 100:02d}-{(start_year + 1) % 100:02d}"
+
+
+def batch_from_session(session: str) -> str:
+    """Reverse the academic session mapping (22-23 or 2022-23 -> 15)."""
+    match = re.fullmatch(r"(?:20)?(?P<start>\d{2})-(?P<end>\d{2})", session.strip())
+    if not match or (int(match.group("start")) + 1) % 100 != int(match.group("end")):
+        raise ValueError("Session must use the format 22-23")
+    return f"{(int(match.group('start')) - 7) % 100:02d}"
+
+
+def ensure_student_batch(db: Session, student: dict[str, str]) -> Batch:
+    program = db.scalar(select(Program).where(Program.code == "BSSE"))
+    if not program:
+        program = Program(code="BSSE", name="BSSE")
+        db.add(program)
+        db.flush()
+    session_name = session_from_batch(student["batch"])
+    academic_session = db.scalar(
+        select(AcademicSession).where(AcademicSession.name == session_name)
+    )
+    if not academic_session:
+        academic_session = AcademicSession(name=session_name)
+        db.add(academic_session)
+        db.flush()
+    batch = db.scalar(
+        select(Batch).where(Batch.program_id == program.id, Batch.code == student["batch"])
+    )
+    if not batch:
+        batch = Batch(
+            code=student["batch"],
+            name=f"Batch {student['batch']}",
+            program_id=program.id,
+            session_id=academic_session.id,
+        )
+        db.add(batch)
+        db.flush()
+    return batch
 
 
 def hash_password(password: str) -> str:
@@ -566,6 +709,51 @@ def send_otp(email: str, otp: str, purpose: str) -> None:
     ) as smtp:
         smtp.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
         smtp.send_message(message)
+
+
+def send_class_email(email: str, subject: str, content: str) -> None:
+    message = EmailMessage()
+    message["Subject"] = f"IIT Management: {subject}"
+    message["From"] = os.environ.get("SMTP_FROM", os.environ["SMTP_USER"])
+    message["To"] = email
+    message.set_content(content)
+    with smtplib.SMTP_SSL(
+        os.getenv("SMTP_HOST", "smtp.gmail.com"),
+        int(os.getenv("SMTP_PORT", "465")),
+        context=ssl.create_default_context(),
+    ) as smtp:
+        smtp.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
+        smtp.send_message(message)
+
+
+def send_web_push(db: Session, user_id: int, title: str, message: str) -> None:
+    private_key = os.getenv("VAPID_PRIVATE_KEY")
+    subject = os.getenv("VAPID_SUBJECT", f"mailto:{os.getenv('SMTP_FROM', '')}")
+    if not private_key or not subject:
+        return
+    try:
+        from pywebpush import webpush
+    except ImportError:
+        return
+    payload = json.dumps({"title": title, "body": message, "url": FRONTEND_URL})
+    for subscription in db.scalars(
+        select(PushSubscription).where(PushSubscription.user_id == user_id)
+    ):
+        try:
+            webpush(
+                subscription_info={
+                    "endpoint": subscription.endpoint,
+                    "keys": {"p256dh": subscription.p256dh, "auth": subscription.auth},
+                },
+                data=payload,
+                vapid_private_key=private_key,
+                vapid_claims={"sub": subject},
+                ttl=3600,
+                timeout=5,
+            )
+        except Exception:
+            # In-app notifications remain available if a browser endpoint expires.
+            continue
 
 
 def make_token(user: User) -> str:
@@ -627,6 +815,22 @@ def student_user(user: User = Depends(current_user)) -> User:
     return user
 
 
+def cr_batch_id(db: Session, user_id: int) -> int | None:
+    return db.scalar(
+        select(CRPosition.batch_id)
+        .join(CRAppointment, CRAppointment.position_id == CRPosition.id)
+        .where(CRAppointment.student_id == user_id, CRAppointment.status == "ACTIVE")
+        .limit(1)
+    )
+
+
+def cr_user(user: User = Depends(student_user)) -> User:
+    with Session(engine) as db:
+        if not cr_batch_id(db, user.id):
+            raise HTTPException(403, "Active CR appointment required")
+    return user
+
+
 def teacher_or_admin(user: User = Depends(current_user)) -> User:
     if user.role not in {"TEACHER", "SUPER_ADMIN", "DEPARTMENT_ADMIN"}:
         raise HTTPException(403, "Teacher or admin access required")
@@ -642,6 +846,29 @@ def get_student(db: Session, user_id: int) -> StudentProfile:
 
 def notify(db: Session, user_id: int, title: str, message: str) -> None:
     db.add(Notification(user_id=user_id, title=title, message=message))
+
+
+def deliver_class_update(
+    db: Session, classroom_id: int, title: str, message: str, *, email: bool = False
+) -> int:
+    students = db.execute(
+        select(User.id, User.email)
+        .join(ClassroomEnrollment, ClassroomEnrollment.student_id == User.id)
+        .where(
+            ClassroomEnrollment.classroom_id == classroom_id,
+            ClassroomEnrollment.status == "ACTIVE",
+        )
+    ).all()
+    for student_id, student_email in students:
+        notify(db, student_id, title, message)
+        send_web_push(db, student_id, title, message)
+        if email:
+            try:
+                send_class_email(student_email, title, message)
+            except (KeyError, OSError, smtplib.SMTPException):
+                # Persist in-app and push notifications even if SMTP is unavailable.
+                continue
+    return len(students)
 
 
 def audit(
@@ -690,19 +917,14 @@ def signup(body: Signup):
         try:
             db.flush()
             if student:
-                batch = db.scalar(
-                    select(Batch)
-                    .join(Program)
-                    .where(Program.code == student["program"], Batch.code == student["batch"])
-                )
-                db.add(StudentProfile(user_id=user.id, batch_id=batch.id if batch else None, **student))
-                if batch:
-                    for classroom_id in db.scalars(
-                        select(Classroom.id).where(
-                            Classroom.batch_id == batch.id, Classroom.status == "ACTIVE"
-                        )
-                    ):
-                        db.add(ClassroomEnrollment(classroom_id=classroom_id, student_id=user.id))
+                batch = ensure_student_batch(db, student)
+                db.add(StudentProfile(user_id=user.id, batch_id=batch.id, **student))
+                for classroom_id in db.scalars(
+                    select(Classroom.id).where(
+                        Classroom.batch_id == batch.id, Classroom.status == "ACTIVE"
+                    )
+                ):
+                    db.add(ClassroomEnrollment(classroom_id=classroom_id, student_id=user.id))
             otp = prepare_otp(user, email, "VERIFY", datetime.now(timezone.utc))
             send_otp(email, otp, "VERIFY")
             db.commit()
@@ -845,7 +1067,18 @@ def reset_password(body: PasswordReset):
 
 @app.get("/api/me")
 def me(user: User = Depends(current_user)):
-    return {"email": user.email, "name": user.name, "role": user.role}
+    return {"email": user.email, "name": user.name, "role": user.role, "profile_picture": user.profile_picture}
+
+
+@app.put("/api/profile-picture")
+def update_profile_picture(body: ProfilePictureUpdate, user: User = Depends(current_user)):
+    if body.image and not re.fullmatch(r"data:image/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=_-]+", body.image):
+        raise HTTPException(400, "Upload a PNG, JPEG, WEBP, or GIF image")
+    with Session(engine) as db:
+        account = db.get(User, user.id)
+        account.profile_picture = body.image
+        db.commit()
+        return {"profile_picture": account.profile_picture}
 
 
 @app.post("/api/auth/logout")
@@ -871,6 +1104,8 @@ def decide_teacher(teacher_id: int, body: TeacherDecision, actor: User = Depends
         teacher = db.get(User, teacher_id)
         if not teacher or teacher.role != "TEACHER" or teacher.status != "PENDING":
             raise HTTPException(404, "Pending teacher not found")
+        if body.action == "MAKE_ADMIN" and actor.role != "SUPER_ADMIN":
+            raise HTTPException(403, "Only the super admin can appoint administrators")
         status = "ACTIVE" if body.action != "REJECT" else "REJECTED"
         if body.action == "MAKE_ADMIN":
             teacher.role = "DEPARTMENT_ADMIN"
@@ -881,52 +1116,76 @@ def decide_teacher(teacher_id: int, body: TeacherDecision, actor: User = Depends
     return {"status": status}
 
 
-@app.post("/api/admin/academic-setup", status_code=201)
-def create_academic_setup(body: AcademicSetup, actor: User = Depends(admin_user)):
+@app.get("/api/admin/users")
+def administrative_users(_: User = Depends(admin_user)):
     with Session(engine) as db:
-        program = db.scalar(select(Program).where(Program.code == body.program_code.upper()))
-        if not program:
-            program = Program(code=body.program_code.upper(), name=body.program_name.strip())
-            db.add(program)
-            db.flush()
-        academic_session = db.scalar(select(AcademicSession).where(AcademicSession.name == body.academic_session))
-        if not academic_session:
-            academic_session = AcademicSession(name=body.academic_session.strip())
-            db.add(academic_session)
-            db.flush()
-        batch = db.scalar(
-            select(Batch).where(Batch.program_id == program.id, Batch.code == body.batch_code)
+        users = db.scalars(
+            select(User)
+            .where(User.role.in_(["TEACHER", "DEPARTMENT_ADMIN", "SUPER_ADMIN"]))
+            .order_by(User.role, User.name)
         )
+        return [
+            {"id": user.id, "name": user.name, "email": user.email, "role": user.role, "status": user.status}
+            for user in users
+        ]
+
+
+@app.patch("/api/admin/users/{user_id}")
+def administer_user(user_id: int, body: StaffDecision, actor: User = Depends(admin_user)):
+    with Session(engine) as db:
+        target = db.get(User, user_id)
+        if not target or target.role not in {"TEACHER", "DEPARTMENT_ADMIN", "SUPER_ADMIN"}:
+            raise HTTPException(404, "Staff account not found")
+        if target.role == "SUPER_ADMIN" or target.id == actor.id:
+            raise HTTPException(403, "This account cannot be changed here")
+        if target.role == "DEPARTMENT_ADMIN" and actor.role != "SUPER_ADMIN":
+            raise HTTPException(403, "Only the super admin can manage administrators")
+        if body.action in {"MAKE_ADMIN", "MAKE_TEACHER"}:
+            if actor.role != "SUPER_ADMIN":
+                raise HTTPException(403, "Only the super admin can change administrator roles")
+            target.role = "DEPARTMENT_ADMIN" if body.action == "MAKE_ADMIN" else "TEACHER"
+        else:
+            target.status = "ACTIVE" if body.action == "ACTIVATE" else "REJECTED"
+        audit(db, actor.id, body.action, "user", target.id, f"{target.role}:{target.status}")
+        db.commit()
+        return {"id": target.id, "role": target.role, "status": target.status}
+
+
+@app.post("/api/cr/academic-setup", status_code=201)
+def create_academic_setup(body: AcademicSetup, actor: User = Depends(cr_user)):
+    with Session(engine) as db:
+        batch_id = cr_batch_id(db, actor.id)
+        batch = db.get(Batch, batch_id)
         if not batch:
-            batch = Batch(
-                code=body.batch_code.strip(),
-                name=body.batch_name.strip(),
-                program_id=program.id,
-                session_id=academic_session.id,
-            )
-            db.add(batch)
-            db.flush()
+            raise HTTPException(404, "CR batch not found")
+        batch_code = batch.code
+        batch.name = body.batch_name.strip()
         semester = db.scalar(select(Semester).where(Semester.number == body.semester_number))
         if not semester:
-            semester = Semester(number=body.semester_number, name=body.semester_name.strip())
+            semester = Semester(number=body.semester_number, name=str(body.semester_number))
             db.add(semester)
             db.flush()
-        course = db.scalar(select(Course).where(Course.code == body.course_code.upper()))
-        if not course:
-            course = Course(
-                code=body.course_code.upper(),
-                name=body.course_name.strip(),
-                credits=body.credits,
-                semester_id=semester.id,
-            )
-            db.add(course)
-        if body.hall_name and not db.scalar(select(Hall).where(Hall.name == body.hall_name.strip())):
-            db.add(Hall(name=body.hall_name.strip()))
-        db.flush()
+        batch.current_semester_id = semester.id
+        saved_courses = []
+        for item in body.courses:
+            code = item.course_code.strip().upper()
+            course = db.scalar(select(Course).where(Course.code == code))
+            if course:
+                course.name = item.course_name.strip()
+                course.credits = item.credits
+                course.semester_id = semester.id
+            else:
+                course = Course(
+                    code=code,
+                    name=item.course_name.strip(),
+                    credits=item.credits,
+                    semester_id=semester.id,
+                )
+                db.add(course)
+            db.flush()
+            saved_courses.append(course.code)
         students = db.scalars(
-            select(StudentProfile).where(
-                StudentProfile.program == program.code, StudentProfile.batch == batch.code
-            )
+            select(StudentProfile).where(StudentProfile.batch_id == batch.id)
         )
         for student in students:
             student.batch_id = batch.id
@@ -947,12 +1206,24 @@ def create_academic_setup(body: AcademicSetup, actor: User = Depends(admin_user)
                             classroom_id=classroom_id, student_id=student.user_id
                         )
                     )
-        audit(db, actor.id, "UPSERT", "course", course.id, course.code)
+        audit(
+            db,
+            actor.id,
+            "UPDATE_ACADEMICS",
+            "batch",
+            batch.id,
+            f"Semester {semester.number}: {', '.join(saved_courses)}",
+        )
         try:
             db.commit()
         except IntegrityError:
             raise HTTPException(409, "Academic item already exists")
-    return {"message": "Academic data saved"}
+    return {
+        "message": "Batch academics updated",
+        "program": "BSSE",
+        "session": session_from_batch(batch_code),
+        "courses": saved_courses,
+    }
 
 
 @app.get("/api/academics")
@@ -962,10 +1233,17 @@ def academics(_: User = Depends(current_user)):
             "programs": [{"id": x.id, "code": x.code, "name": x.name} for x in db.scalars(select(Program))],
             "sessions": [{"id": x.id, "name": x.name} for x in db.scalars(select(AcademicSession))],
             "batches": [
-                {"id": x.id, "code": x.code, "name": x.name, "program_id": x.program_id, "session_id": x.session_id}
+                {
+                    "id": x.id,
+                    "code": x.code,
+                    "name": x.name,
+                    "program_id": x.program_id,
+                    "session_id": x.session_id,
+                    "current_semester_id": x.current_semester_id,
+                }
                 for x in db.scalars(select(Batch).where(Batch.status == "ACTIVE"))
             ],
-            "semesters": [{"id": x.id, "number": x.number, "name": x.name} for x in db.scalars(select(Semester))],
+            "semesters": [{"id": x.id, "number": x.number} for x in db.scalars(select(Semester))],
             "courses": [
                 {"id": x.id, "code": x.code, "name": x.name, "credits": x.credits, "semester_id": x.semester_id}
                 for x in db.scalars(select(Course))
@@ -974,7 +1252,7 @@ def academics(_: User = Depends(current_user)):
         }
 
 
-def profile_data(profile: StudentProfile) -> dict:
+def profile_data(profile: StudentProfile, academic: dict | None = None) -> dict:
     return {
         "program": profile.program,
         "batch": profile.batch,
@@ -989,13 +1267,26 @@ def profile_data(profile: StudentProfile) -> dict:
         "donor_available": profile.donor_available,
         "donor_contact_visible": profile.donor_contact_visible,
         "profile_completed": profile.profile_completed,
+        **(academic or {}),
     }
 
 
 @app.get("/api/student/profile")
 def read_profile(user: User = Depends(student_user)):
     with Session(engine) as db:
-        return profile_data(get_student(db, user.id))
+        profile = get_student(db, user.id)
+        batch = db.get(Batch, profile.batch_id) if profile.batch_id else None
+        academic_session = db.get(AcademicSession, batch.session_id) if batch else None
+        semester = db.get(Semester, batch.current_semester_id) if batch and batch.current_semester_id else None
+        return profile_data(
+            profile,
+            {
+                "batch_name": batch.name if batch else "",
+                "academic_session": academic_session.name if academic_session else session_from_batch(profile.batch),
+                "semester_number": semester.number if semester else None,
+                "is_cr": bool(cr_batch_id(db, user.id)),
+            },
+        )
 
 
 @app.put("/api/student/profile")
@@ -1222,6 +1513,23 @@ def can_manage_classroom(user: User, classroom: Classroom) -> bool:
     return user.role in {"SUPER_ADMIN", "DEPARTMENT_ADMIN"} or classroom.teacher_id == user.id
 
 
+def can_view_classroom(db: Session, user: User, classroom: Classroom | None) -> bool:
+    if not classroom:
+        return False
+    if can_manage_classroom(user, classroom):
+        return True
+    return bool(
+        user.role == "STUDENT"
+        and db.scalar(
+            select(ClassroomEnrollment.id).where(
+                ClassroomEnrollment.classroom_id == classroom.id,
+                ClassroomEnrollment.student_id == user.id,
+                ClassroomEnrollment.status == "ACTIVE",
+            )
+        )
+    )
+
+
 @app.post("/api/classrooms", status_code=201)
 def create_classroom(body: ClassroomCreate, user: User = Depends(teacher_or_admin)):
     with Session(engine) as db:
@@ -1282,6 +1590,60 @@ def classrooms(user: User = Depends(current_user)):
         return output
 
 
+@app.post("/api/classrooms/{classroom_id}/posts", status_code=201)
+def create_class_post(
+    classroom_id: int, body: ClassPostCreate, user: User = Depends(teacher_or_admin)
+):
+    with Session(engine) as db:
+        classroom = db.get(Classroom, classroom_id)
+        if not classroom or not can_manage_classroom(user, classroom):
+            raise HTTPException(403, "Cannot manage this classroom")
+        if body.kind == "RESOURCE" and not body.resource_url:
+            raise HTTPException(400, "A resource link is required")
+        post = ClassPost(classroom_id=classroom_id, author_id=user.id, **body.model_dump())
+        db.add(post)
+        db.flush()
+        course = db.get(Course, classroom.course_id)
+        for student_id in db.scalars(
+            select(ClassroomEnrollment.student_id).where(
+                ClassroomEnrollment.classroom_id == classroom_id,
+                ClassroomEnrollment.status == "ACTIVE",
+            )
+        ):
+            notify(db, student_id, f"New {body.kind.lower()}", f"{course.code}: {body.title}")
+        audit(db, user.id, "PUBLISH", "class_post", post.id, f"{body.kind}:{body.title}")
+        db.commit()
+        db.refresh(post)
+        return {"id": post.id, "created_at": post.created_at}
+
+
+@app.get("/api/classrooms/{classroom_id}/posts")
+def classroom_posts(classroom_id: int, user: User = Depends(current_user)):
+    with Session(engine) as db:
+        classroom = db.get(Classroom, classroom_id)
+        if not can_view_classroom(db, user, classroom):
+            raise HTTPException(403, "Cannot view this classroom")
+        rows = db.execute(
+            select(ClassPost, User)
+            .join(User, User.id == ClassPost.author_id)
+            .where(ClassPost.classroom_id == classroom_id)
+            .order_by(ClassPost.created_at.desc())
+            .limit(100)
+        )
+        return [
+            {
+                "id": post.id,
+                "kind": post.kind,
+                "title": post.title,
+                "content": post.content,
+                "resource_url": post.resource_url,
+                "author": author.name,
+                "created_at": post.created_at,
+            }
+            for post, author in rows
+        ]
+
+
 @app.post("/api/classrooms/{classroom_id}/sessions", status_code=201)
 def create_class_session(
     classroom_id: int, body: ClassSessionCreate, user: User = Depends(teacher_or_admin)
@@ -1299,17 +1661,143 @@ def create_class_session(
         return {"id": class_session.id}
 
 
+def next_recurring_date(schedule: RecurringClass, db: Session, start: date | None = None) -> date:
+    local_now = datetime.now(APP_TIMEZONE)
+    candidate = start or local_now.date()
+    candidate += timedelta(days=(schedule.weekday - candidate.weekday()) % 7)
+    if not start and candidate == local_now.date() and schedule.starts_at <= local_now.time().replace(tzinfo=None):
+        candidate += timedelta(days=7)
+    while db.scalar(
+        select(RecurringClassCancellation.id).where(
+            RecurringClassCancellation.recurring_class_id == schedule.id,
+            RecurringClassCancellation.occurrence_date == candidate,
+        )
+    ):
+        candidate += timedelta(days=7)
+    return candidate
+
+
+@app.post("/api/classrooms/{classroom_id}/recurring", status_code=201)
+def create_recurring_class(
+    classroom_id: int, body: RecurringClassCreate, user: User = Depends(teacher_or_admin)
+):
+    if body.starts_at >= body.ends_at:
+        raise HTTPException(400, "End time must be after start time")
+    with Session(engine) as db:
+        classroom = db.get(Classroom, classroom_id)
+        if not classroom or not can_manage_classroom(user, classroom):
+            raise HTTPException(403, "Cannot manage this classroom")
+        schedule = RecurringClass(classroom_id=classroom_id, created_by=user.id, **body.model_dump())
+        db.add(schedule)
+        try:
+            db.flush()
+        except IntegrityError:
+            raise HTTPException(409, "This recurring class already exists")
+        course = db.get(Course, classroom.course_id)
+        weekday = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][body.weekday]
+        deliver_class_update(
+            db,
+            classroom_id,
+            "Recurring class scheduled",
+            f"{course.code} meets every {weekday} at {body.starts_at.strftime('%I:%M %p')}.",
+        )
+        audit(db, user.id, "CREATE", "recurring_class", schedule.id, course.code)
+        db.commit()
+        return {"id": schedule.id, "next_date": next_recurring_date(schedule, db)}
+
+
+@app.post("/api/recurring-classes/{schedule_id}/start", status_code=201)
+def start_recurring_class(
+    schedule_id: int, body: RecurringOccurrence, user: User = Depends(teacher_or_admin)
+):
+    with Session(engine) as db:
+        schedule = db.get(RecurringClass, schedule_id)
+        classroom = db.get(Classroom, schedule.classroom_id) if schedule else None
+        if not schedule or not schedule.active or not classroom or not can_manage_classroom(user, classroom):
+            raise HTTPException(403, "Cannot manage this recurring class")
+        if body.occurrence_date.weekday() != schedule.weekday:
+            raise HTTPException(400, "Date does not match the recurring weekday")
+        cancelled = db.scalar(
+            select(RecurringClassCancellation.id).where(
+                RecurringClassCancellation.recurring_class_id == schedule.id,
+                RecurringClassCancellation.occurrence_date == body.occurrence_date,
+            )
+        )
+        if cancelled:
+            raise HTTPException(400, "This class occurrence is cancelled")
+        class_session = db.scalar(
+            select(ClassSession).where(
+                ClassSession.classroom_id == classroom.id,
+                ClassSession.session_date == body.occurrence_date,
+                ClassSession.starts_at == schedule.starts_at,
+            )
+        )
+        if not class_session:
+            class_session = ClassSession(
+                classroom_id=classroom.id,
+                session_date=body.occurrence_date,
+                starts_at=schedule.starts_at,
+                ends_at=schedule.ends_at,
+                topic=schedule.topic,
+            )
+            db.add(class_session)
+            db.commit()
+            db.refresh(class_session)
+        return {"id": class_session.id}
+
+
+@app.post("/api/recurring-classes/{schedule_id}/cancel", status_code=201)
+def cancel_recurring_class(
+    schedule_id: int,
+    body: RecurringCancellationCreate,
+    user: User = Depends(teacher_or_admin),
+):
+    with Session(engine) as db:
+        schedule = db.get(RecurringClass, schedule_id)
+        classroom = db.get(Classroom, schedule.classroom_id) if schedule else None
+        if not schedule or not classroom or not can_manage_classroom(user, classroom):
+            raise HTTPException(403, "Cannot manage this recurring class")
+        if body.occurrence_date.weekday() != schedule.weekday:
+            raise HTTPException(400, "Date does not match the recurring weekday")
+        cancellation = RecurringClassCancellation(
+            recurring_class_id=schedule.id,
+            occurrence_date=body.occurrence_date,
+            reason=body.reason.strip(),
+            cancelled_by=user.id,
+        )
+        db.add(cancellation)
+        try:
+            db.flush()
+        except IntegrityError:
+            raise HTTPException(409, "This occurrence is already cancelled")
+        existing_session = db.scalar(
+            select(ClassSession).where(
+                ClassSession.classroom_id == classroom.id,
+                ClassSession.session_date == body.occurrence_date,
+                ClassSession.starts_at == schedule.starts_at,
+            )
+        )
+        if existing_session:
+            existing_session.status = "CANCELLED"
+        course = db.get(Course, classroom.course_id)
+        reason = f" Reason: {body.reason.strip()}" if body.reason.strip() else ""
+        recipient_count = deliver_class_update(
+            db,
+            classroom.id,
+            "Class cancelled",
+            f"{course.code} on {body.occurrence_date.isoformat()} has been cancelled.{reason}",
+            email=True,
+        )
+        audit(db, user.id, "CANCEL", "recurring_class", schedule.id, body.occurrence_date.isoformat())
+        db.commit()
+        return {"cancelled": True, "notified": recipient_count}
+
+
 @app.get("/api/classrooms/{classroom_id}/sessions")
 def classroom_sessions(classroom_id: int, user: User = Depends(current_user)):
     with Session(engine) as db:
         classroom = db.get(Classroom, classroom_id)
-        enrolled = db.scalar(
-            select(ClassroomEnrollment.id).where(
-                ClassroomEnrollment.classroom_id == classroom_id,
-                ClassroomEnrollment.student_id == user.id,
-            )
-        )
-        if not classroom or not (enrolled or can_manage_classroom(user, classroom)):
+        if not can_view_classroom(db, user, classroom):
             raise HTTPException(403, "Cannot view this classroom")
         sessions = []
         for class_session in db.scalars(
@@ -1330,11 +1818,29 @@ def classroom_sessions(classroom_id: int, user: User = Depends(current_user)):
                     "starts_at": class_session.starts_at,
                     "ends_at": class_session.ends_at,
                     "topic": class_session.topic,
+                    "status": class_session.status,
                     "attendance": [
                         {"student_id": record.student_id, "name": record_user.name, "email": record_user.email, "status": record.status}
                         for record, record_user in records
                         if can_manage_classroom(user, classroom) or record.student_id == user.id
                     ],
+                }
+            )
+        recurring = []
+        for schedule in db.scalars(
+            select(RecurringClass)
+            .where(RecurringClass.classroom_id == classroom_id, RecurringClass.active.is_(True))
+            .order_by(RecurringClass.weekday, RecurringClass.starts_at)
+        ):
+            recurring.append(
+                {
+                    "id": schedule.id,
+                    "weekday": schedule.weekday,
+                    "starts_at": schedule.starts_at,
+                    "ends_at": schedule.ends_at,
+                    "topic": schedule.topic,
+                    "reminder_minutes": schedule.reminder_minutes,
+                    "next_date": next_recurring_date(schedule, db),
                 }
             )
         if can_manage_classroom(user, classroom):
@@ -1344,8 +1850,8 @@ def classroom_sessions(classroom_id: int, user: User = Depends(current_user)):
                 .where(ClassroomEnrollment.classroom_id == classroom_id)
                 .order_by(User.email)
             ).all()
-            return {"sessions": sessions, "roster": [dict(row._mapping) for row in roster]}
-        return {"sessions": sessions}
+            return {"sessions": sessions, "recurring": recurring, "roster": [dict(row._mapping) for row in roster]}
+        return {"sessions": sessions, "recurring": recurring}
 
 
 @app.put("/api/sessions/{class_session_id}/attendance")
@@ -1357,6 +1863,8 @@ def save_attendance(
         classroom = db.get(Classroom, class_session.classroom_id) if class_session else None
         if not classroom or not can_manage_classroom(user, classroom):
             raise HTTPException(403, "Cannot manage this classroom")
+        if class_session.status == "CANCELLED":
+            raise HTTPException(400, "Attendance cannot be taken for a cancelled class")
         for item in body.records:
             enrolled = db.scalar(
                 select(ClassroomEnrollment.id).where(
@@ -1605,6 +2113,61 @@ def notifications(user: User = Depends(current_user)):
             }
             for item in items
         ]
+
+
+@app.post("/api/push/subscribe", status_code=201)
+def subscribe_push(body: PushSubscriptionCreate, user: User = Depends(current_user)):
+    with Session(engine) as db:
+        subscription = db.scalar(
+            select(PushSubscription).where(PushSubscription.endpoint == body.endpoint)
+        )
+        if subscription:
+            subscription.user_id = user.id
+            subscription.p256dh = body.p256dh
+            subscription.auth = body.auth
+        else:
+            db.add(PushSubscription(user_id=user.id, **body.model_dump()))
+        db.commit()
+    return {"subscribed": True}
+
+
+@app.get("/api/jobs/class-reminders")
+def class_reminders(authorization: str | None = Header(default=None)):
+    secret = os.getenv("CRON_SECRET")
+    if not secret or authorization != f"Bearer {secret}":
+        raise HTTPException(401, "Invalid cron authorization")
+    now = datetime.now(APP_TIMEZONE)
+    sent = 0
+    with Session(engine) as db:
+        schedules = db.scalars(
+            select(RecurringClass).where(
+                RecurringClass.active.is_(True), RecurringClass.weekday == now.weekday()
+            )
+        )
+        for schedule in schedules:
+            starts = datetime.combine(now.date(), schedule.starts_at, APP_TIMEZONE)
+            minutes_until = (starts - now).total_seconds() / 60
+            if not 0 <= minutes_until <= schedule.reminder_minutes or schedule.last_notified_on == now.date():
+                continue
+            cancelled = db.scalar(
+                select(RecurringClassCancellation.id).where(
+                    RecurringClassCancellation.recurring_class_id == schedule.id,
+                    RecurringClassCancellation.occurrence_date == now.date(),
+                )
+            )
+            if cancelled:
+                continue
+            classroom = db.get(Classroom, schedule.classroom_id)
+            course = db.get(Course, classroom.course_id)
+            sent += deliver_class_update(
+                db,
+                classroom.id,
+                "Class starts soon",
+                f"{course.code} starts at {schedule.starts_at.strftime('%I:%M %p')}. {schedule.topic}",
+            )
+            schedule.last_notified_on = now.date()
+        db.commit()
+    return {"notifications": sent, "checked_at": now}
 
 
 @app.patch("/api/notifications/{notification_id}/read")

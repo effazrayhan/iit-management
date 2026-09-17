@@ -21,30 +21,42 @@ from api.index import (
     CRElection,
     CRPositionCreate,
     CandidateDecision,
+    ClassPostCreate,
     ClassSessionCreate,
     ClassroomCreate,
     ComplaintCreate,
     ComplaintDecision,
     Course,
+    CourseSetup,
     ElectionCreate,
     FeedbackCreate,
     NominationCreate,
     OtpRequest,
+    RecurringCancellationCreate,
+    RecurringClassCreate,
+    RecurringOccurrence,
     Signup,
     StudentProfileUpdate,
+    StaffDecision,
     TeacherDecision,
     User,
     VoteCreate,
     admin_user,
+    administer_user,
+    administrative_users,
     attendance_summary,
     audit_log,
     close_election,
+    cancel_recurring_class,
+    classroom_posts,
     create_academic_setup,
     create_class_session,
     create_classroom,
+    create_class_post,
     create_complaint,
     create_cr_position,
     create_election,
+    create_recurring_class,
     decide_candidate,
     decide_teacher,
     dashboard,
@@ -54,6 +66,7 @@ from api.index import (
     notifications,
     save_attendance,
     signup,
+    start_recurring_class,
     submit_feedback,
     update_complaint,
     update_profile,
@@ -74,25 +87,18 @@ class PhaseFlowTest(unittest.TestCase):
                 return user
 
         admin = register("Admin", "admin@iit.du.ac.bd")
-        create_academic_setup(
-            AcademicSetup(
-                program_code="BSSE",
-                program_name="Bachelor of Software Engineering",
-                academic_session="2022-23",
-                batch_code="15",
-                batch_name="15th Batch",
-                semester_number=5,
-                semester_name="5th Semester",
-                course_code="SE-301",
-                course_name="Software Architecture",
-                credits=3,
-                hall_name="Test Hall",
-            ),
-            admin,
-        )
         teacher = register("Teacher", "teacher2@iit.du.ac.bd")
         decide_teacher(teacher.id, TeacherDecision(action="APPROVE"), admin)
         teacher.status = "ACTIVE"
+        self.assertTrue(any(member["email"] == teacher.email for member in administrative_users(admin)))
+        self.assertEqual(
+            administer_user(teacher.id, StaffDecision(action="MAKE_ADMIN"), admin)["role"],
+            "DEPARTMENT_ADMIN",
+        )
+        self.assertEqual(
+            administer_user(teacher.id, StaffDecision(action="MAKE_TEACHER"), admin)["role"],
+            "TEACHER",
+        )
         student_one = register("Student 01", "bsse1501@iit.du.ac.bd")
         student_two = register("Student 02", "bsse1502@iit.du.ac.bd")
 
@@ -110,9 +116,7 @@ class PhaseFlowTest(unittest.TestCase):
         )
         with Session(engine) as db:
             batch = db.scalar(select(Batch).where(Batch.code == "15"))
-            course = db.scalar(select(Course).where(Course.code == "SE-301"))
             batch_id, session_id = batch.id, batch.session_id
-            course_id, semester_id = course.id, course.semester_id
 
         position = create_cr_position(
             CRPositionCreate(batch_id=batch_id, title="General CR", seats=1), admin
@@ -146,6 +150,26 @@ class PhaseFlowTest(unittest.TestCase):
             db.commit()
         self.assertEqual(close_election(election["id"], admin)["winners"], [student_one.id])
 
+        academic_result = create_academic_setup(
+            AcademicSetup(
+                batch_name="Code Fifteen",
+                semester_number=5,
+                courses=[
+                    CourseSetup(course_code="SE-301", course_name="Software Architecture", credits=3),
+                    CourseSetup(course_code="SE-302", course_name="Software Testing", credits=2),
+                ],
+            ),
+            student_one,
+        )
+        self.assertEqual(academic_result["session"], "22-23")
+        self.assertEqual(len(academic_result["courses"]), 2)
+        with Session(engine) as db:
+            batch = db.get(Batch, batch_id)
+            course = db.scalar(select(Course).where(Course.code == "SE-301"))
+            self.assertEqual(batch.name, "Code Fifteen")
+            self.assertEqual(batch.current_semester_id, course.semester_id)
+            course_id, semester_id = course.id, course.semester_id
+
         classroom = create_classroom(
             ClassroomCreate(
                 course_id=course_id,
@@ -155,6 +179,50 @@ class PhaseFlowTest(unittest.TestCase):
             ),
             teacher,
         )
+        create_class_post(
+            classroom["id"],
+            ClassPostCreate(
+                kind="RESOURCE",
+                title="Architecture notes",
+                content="Read before the next class.",
+                resource_url="https://example.com/architecture-notes",
+            ),
+            teacher,
+        )
+        posts = classroom_posts(classroom["id"], student_one)
+        self.assertEqual(posts[0]["title"], "Architecture notes")
+        self.assertEqual(posts[0]["kind"], "RESOURCE")
+        with patch("api.index.send_class_email"), patch("api.index.send_web_push"):
+            recurring = create_recurring_class(
+                classroom["id"],
+                RecurringClassCreate(
+                    weekday=date.today().weekday(),
+                    starts_at=time(9),
+                    ends_at=time(10),
+                    topic="Weekly architecture class",
+                    reminder_minutes=30,
+                ),
+                teacher,
+            )
+            recurring_session = start_recurring_class(
+                recurring["id"], RecurringOccurrence(occurrence_date=recurring["next_date"]), teacher
+            )
+            self.assertTrue(recurring_session["id"])
+            cancellation = cancel_recurring_class(
+                recurring["id"],
+                RecurringCancellationCreate(
+                    occurrence_date=recurring["next_date"],
+                    reason="Department event",
+                ),
+                teacher,
+            )
+            self.assertEqual(cancellation["notified"], 2)
+            with self.assertRaises(HTTPException):
+                save_attendance(
+                    recurring_session["id"],
+                    AttendanceUpdate(records=[AttendanceItem(student_id=student_one.id, status="PRESENT")]),
+                    teacher,
+                )
         class_session = create_class_session(
             classroom["id"],
             ClassSessionCreate(
